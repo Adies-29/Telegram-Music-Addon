@@ -257,15 +257,6 @@ router.get('/channels', async (req, res) => {
   }
 });
 
-const iconPath = path.join(__dirname, 'icon.png');
-let iconDataUri = '';
-if (fs.existsSync(iconPath)) {
-  try {
-    const iconBuf = fs.readFileSync(iconPath);
-    iconDataUri = `data:image/png;base64,${iconBuf.toString('base64')}`;
-  } catch (_) {}
-}
-
 router.get('/qr', async (req, res) => {
   const targetUrl = req.query.url;
   if (!targetUrl) {
@@ -275,7 +266,7 @@ router.get('/qr', async (req, res) => {
   try {
     const svg = await QRCode.toString(targetUrl, {
       type: 'svg',
-      errorCorrectionLevel: 'H',
+      errorCorrectionLevel: 'M',
       margin: 2,
       color: {
         dark: '#000000',
@@ -283,27 +274,9 @@ router.get('/qr', async (req, res) => {
       },
     });
 
-    const match = svg.match(/viewBox="0 0 (\d+) (\d+)"/);
-    if (!match) {
-      res.setHeader('Content-Type', 'image/svg+xml');
-      return res.send(svg);
-    }
-
-    const size = parseInt(match[1], 10);
-    const logoSize = Math.round(size * 0.22);
-    const logoPos = (size - logoSize) / 2;
-    const bgPad = 1;
-    const bgPos = logoPos - bgPad;
-    const bgSize = logoSize + (bgPad * 2);
-
-    const imageHref = iconDataUri || '/icon.png';
-    const defs = `<defs><clipPath id="qr-logo-clip"><rect x="${logoPos}" y="${logoPos}" width="${logoSize}" height="${logoSize}" rx="1.5" ry="1.5" /></clipPath></defs>`;
-    const overlay = `${defs}<rect x="${bgPos}" y="${bgPos}" width="${bgSize}" height="${bgSize}" rx="2" fill="#ffffff" stroke="#cbd5e1" stroke-width="0.3" /><image href="${imageHref}" x="${logoPos}" y="${logoPos}" width="${logoSize}" height="${logoSize}" preserveAspectRatio="xMidYMid slice" clip-path="url(#qr-logo-clip)" />`;
-
-    const finalSvg = svg.replace('</svg>', `${overlay}</svg>`);
     res.setHeader('Content-Type', 'image/svg+xml');
     res.setHeader('Cache-Control', 'public, max-age=86400');
-    return res.send(finalSvg);
+    return res.send(svg);
   } catch (err) {
     return res.status(500).send('Failed to generate QR code');
   }
