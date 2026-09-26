@@ -2877,7 +2877,7 @@ async function startTelegramService() {
 
       setupApi.setOnConfigSaved(async (updates) => {
         console.log('[Setup] New configuration received. Initializing Telegram service...');
-        if (!client.connected) {
+        if (!client || !client.connected) {
           const parsedApiId = parseInt(updates.TELEGRAM_API_ID, 10);
           client = new TelegramClient(new StringSession(updates.TELEGRAM_SESSION_STRING), parsedApiId, updates.TELEGRAM_API_HASH, {
             connectionRetries: 5,
