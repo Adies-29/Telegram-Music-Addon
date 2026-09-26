@@ -1425,6 +1425,72 @@ app.get('/notifications/flush', async (req, res) => {
   }
 });
 
+// Clean lossy tracks endpoint: purges lossy MP3/M4A/Opus tracks under threshold (default 10MB)
+app.all('/clean-lossy', async (req, res) => {
+  try {
+    const maxSizeMb = Number(req.query.maxSizeMb) || 10;
+    const confirm = req.query.confirm === 'true';
+
+    const targets = trackIndex.filter((t) => {
+      if (t.keep) return false;
+      const isAtmos = Boolean(t.isAtmos || t.format === 'eac3-joc' || t.quality === 'Dolby Atmos');
+      const fmt = (t.format || '').toLowerCase();
+      const sizeMb = (t.sizeBytes || 0) / (1024 * 1024);
+      return !isAtmos && !['flac', 'alac', 'wav'].includes(fmt) && sizeMb <= maxSizeMb;
+    });
+
+    if (!confirm) {
+      return res.json({
+        dryRun: true,
+        count: targets.length,
+        message: 'Pass ?confirm=true to permanently delete these messages from Telegram and remove from library.',
+        tracks: targets.map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist,
+          format: t.format,
+          sizeMb: ((t.sizeBytes || 0) / (1024 * 1024)).toFixed(2),
+        })),
+      });
+    }
+
+    const idsToDelete = targets.map((t) => t.id);
+    if (idsToDelete.length > 0) {
+      console.log(`[Clean Lossy] Deleting ${idsToDelete.length} lossy tracks from Telegram channel...`);
+      // Delete in batches of 50 to respect Telegram bulk deletion limits
+      for (let i = 0; i < idsToDelete.length; i += 50) {
+        const batch = idsToDelete.slice(i, i + 50);
+        await deleteTelegramMessages(batch);
+      }
+
+      const targetIdSet = new Set(idsToDelete.map(String));
+      trackIndex = trackIndex.filter((t) => !targetIdSet.has(String(t.id)));
+      for (const id of idsToDelete) {
+        mediaCache.delete(id);
+        fastStartCache.delete(id);
+      }
+      saveCache();
+      updateMediaCacheCapacity();
+      console.log(`[Clean Lossy] Successfully deleted ${idsToDelete.length} lossy tracks.`);
+    }
+
+    res.json({
+      success: true,
+      deletedCount: idsToDelete.length,
+      deletedTracks: targets.map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        format: t.format,
+        sizeMb: ((t.sizeBytes || 0) / (1024 * 1024)).toFixed(2),
+      })),
+    });
+  } catch (err) {
+    console.error('Clean lossy error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const ARTIST_SEPARATORS_REGEX = /\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*/i;
 const BRACKETED_REGEX = /[([][^()[\]]*[)\]]/g;
 const NOISE_WORDS_REGEX = /\b(?:official|video|audio|lyrics|lyric|lyrical|song|songs|full|hd|hq|4k|mp3|flac|ost|soundtrack|remaster|remastered|atmos|dolby)\b/gi;
