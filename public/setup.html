@@ -17,7 +17,11 @@
           <p class="brand-subtitle">Telegram Music Addon Setup</p>
         </div>
       </div>
-      <div class="theme-controls">
+      <div class="topbar-actions">
+        <button type="button" class="demo-toggle" id="demoToggle" aria-label="Toggle demo mode" title="Interactive Walkthrough">
+          <span class="demo-dot"></span>
+          <span id="demoToggleLabel">Demo Mode</span>
+        </button>
         <button type="button" class="theme-toggle" id="themeToggle" aria-label="Toggle theme mode" title="Switch theme (Auto, Dark, Light)">
           <span class="theme-icon" id="themeIcon"></span>
           <span class="theme-label" id="themeLabel">Auto</span>
@@ -27,26 +31,42 @@
 
     <main class="wizard-card">
       <nav class="steps-progress" aria-label="Setup steps">
-        <div class="step-indicator active" id="stepIndicator1" data-step="1">
+        <div class="step-indicator active" id="stepIndicator1" data-step="1" title="Step 1: Telegram">
           <span class="step-num">1</span>
           <span class="step-text">Telegram</span>
         </div>
         <div class="step-divider"></div>
-        <div class="step-indicator" id="stepIndicator2" data-step="2">
+        <div class="step-indicator" id="stepIndicator2" data-step="2" title="Step 2: Verification">
           <span class="step-num">2</span>
           <span class="step-text">Verification</span>
         </div>
         <div class="step-divider"></div>
-        <div class="step-indicator" id="stepIndicator3" data-step="3">
+        <div class="step-indicator" id="stepIndicator3" data-step="3" title="Step 3: Library">
           <span class="step-num">3</span>
           <span class="step-text">Library</span>
         </div>
         <div class="step-divider"></div>
-        <div class="step-indicator" id="stepIndicator4" data-step="4">
+        <div class="step-indicator" id="stepIndicator4" data-step="4" title="Step 4: Connect">
           <span class="step-num">4</span>
           <span class="step-text">Connect</span>
         </div>
       </nav>
+
+      <div class="demo-banner hidden" id="demoBanner">
+        <div>
+          <strong>Demo Walkthrough:</strong>
+          <span>Testing all 4 onboarding steps with simulated data. Your real .env is untouched.</span>
+        </div>
+        <button type="button" class="btn-text" id="btnExitDemo">Exit Demo</button>
+      </div>
+
+      <div class="sneak-peek-bar hidden" id="sneakPeekBar">
+        <div>
+          <strong>Sneak Peek:</strong>
+          <span id="sneakPeekText">Reviewing previous step</span>
+        </div>
+        <button type="button" class="btn-text" id="btnReturnToLatest">Return to Connect &rarr;</button>
+      </div>
 
       <div class="alert-box error hidden" id="globalError" role="alert"></div>
 
@@ -225,7 +245,8 @@
           </div>
         </div>
 
-        <div class="form-actions center">
+        <div class="form-actions center" style="gap: 12px; flex-wrap: wrap;">
+          <button type="button" class="btn secondary" id="btnSneakPeek">Review Previous Steps</button>
           <button type="button" class="btn secondary" id="btnReconfigure">Reconfigure Settings</button>
         </div>
       </section>

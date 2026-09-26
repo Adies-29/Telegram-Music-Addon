@@ -26,8 +26,8 @@
   function applyTheme(theme) {
     if (!THEMES.includes(theme)) theme = 'auto';
     document.documentElement.setAttribute('data-theme', theme);
-    themeLabel.textContent = THEME_DATA[theme].label;
-    themeIcon.innerHTML = THEME_DATA[theme].svg;
+    if (themeLabel) themeLabel.textContent = THEME_DATA[theme].label;
+    if (themeIcon) themeIcon.innerHTML = THEME_DATA[theme].svg;
     localStorage.setItem(THEME_STORAGE_KEY, theme);
   }
 
@@ -42,8 +42,57 @@
   }
   applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'auto');
 
-  // ── Step Navigation ─────────────────────────────────────────────────────
+  // ── Demo Mode Detection ─────────────────────────────────────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  const isDemoMode = urlParams.get('demo') === 'true' || urlParams.get('demo') === '1';
+
+  const demoToggle = document.getElementById('demoToggle');
+  const demoToggleLabel = document.getElementById('demoToggleLabel');
+  const demoBanner = document.getElementById('demoBanner');
+  const btnExitDemo = document.getElementById('btnExitDemo');
+
+  if (demoToggle) {
+    if (isDemoMode) {
+      demoToggle.classList.add('active');
+      if (demoToggleLabel) demoToggleLabel.textContent = 'Exit Demo';
+      demoToggle.title = 'Click to exit demo mode and return to real setup';
+    } else {
+      demoToggle.classList.remove('active');
+      if (demoToggleLabel) demoToggleLabel.textContent = 'Demo Mode';
+      demoToggle.title = 'Click to try interactive demo walkthrough';
+    }
+
+    demoToggle.addEventListener('click', () => {
+      if (isDemoMode) {
+        window.location.href = window.location.pathname;
+      } else {
+        window.location.href = window.location.pathname + '?demo=true';
+      }
+    });
+  }
+
+  if (btnExitDemo) {
+    btnExitDemo.addEventListener('click', () => {
+      window.location.href = window.location.pathname;
+    });
+  }
+
+  if (isDemoMode && demoBanner) {
+    demoBanner.classList.remove('hidden');
+  }
+
+  // ── Step Navigation & Sneak Peek State ───────────────────────────────────
   let currentStep = 1;
+  let maxStepReached = isDemoMode ? 4 : 1;
+  let latestStep = 1;
+
+  const STEP_NAMES = {
+    1: 'Telegram Credentials',
+    2: 'Code Verification',
+    3: 'Music Library',
+    4: 'Connect BitChord',
+  };
+
   const panels = {
     1: document.getElementById('panelStep1'),
     2: document.getElementById('panelStep2'),
@@ -57,6 +106,10 @@
     4: document.getElementById('stepIndicator4'),
   };
   const globalError = document.getElementById('globalError');
+  const sneakPeekBar = document.getElementById('sneakPeekBar');
+  const sneakPeekText = document.getElementById('sneakPeekText');
+  const btnReturnToLatest = document.getElementById('btnReturnToLatest');
+  const btnSneakPeek = document.getElementById('btnSneakPeek');
 
   function showError(msg) {
     if (!globalError) return;
@@ -74,21 +127,98 @@
     showError(null);
   }
 
-  function setStep(step) {
+  function updateStepIndicators() {
+    for (let i = 1; i <= 4; i++) {
+      const el = indicators[i];
+      if (!el) continue;
+
+      el.classList.remove('active', 'completed', 'clickable');
+
+      if (i < currentStep) {
+        el.classList.add('completed');
+      } else if (i === currentStep) {
+        el.classList.add('active');
+      }
+
+      if (i <= maxStepReached || isDemoMode) {
+        el.classList.add('clickable');
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('role', 'button');
+      } else {
+        el.removeAttribute('tabindex');
+        el.removeAttribute('role');
+      }
+    }
+  }
+
+  function setStep(step, isSneakPeek = false) {
     currentStep = step;
     clearError();
+
+    if (step > maxStepReached) {
+      maxStepReached = step;
+    }
+    if (!isSneakPeek && step > latestStep) {
+      latestStep = step;
+    }
 
     for (let i = 1; i <= 4; i++) {
       if (panels[i]) {
         if (i === step) panels[i].classList.remove('hidden');
         else panels[i].classList.add('hidden');
       }
-      if (indicators[i]) {
-        indicators[i].classList.remove('active', 'completed');
-        if (i < step) indicators[i].classList.add('completed');
-        else if (i === step) indicators[i].classList.add('active');
+    }
+
+    updateStepIndicators();
+
+    // Sneak Peek Bar logic
+    if (sneakPeekBar) {
+      if (latestStep > currentStep) {
+        sneakPeekBar.classList.remove('hidden');
+        if (sneakPeekText) {
+          sneakPeekText.textContent = `Viewing Step ${step}: ${STEP_NAMES[step] || ''}`;
+        }
+        if (btnReturnToLatest) {
+          btnReturnToLatest.textContent = `Return to Step ${latestStep} (${STEP_NAMES[latestStep] || ''}) \u2192`;
+        }
+      } else {
+        sneakPeekBar.classList.add('hidden');
       }
     }
+  }
+
+  // Step indicator click listener for sneak peeking
+  for (let i = 1; i <= 4; i++) {
+    const ind = indicators[i];
+    if (ind) {
+      ind.addEventListener('click', () => {
+        if (i <= maxStepReached || isDemoMode) {
+          const isPeeking = i < latestStep;
+          setStep(i, isPeeking);
+        }
+      });
+      ind.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (i <= maxStepReached || isDemoMode) {
+            const isPeeking = i < latestStep;
+            setStep(i, isPeeking);
+          }
+        }
+      });
+    }
+  }
+
+  if (btnReturnToLatest) {
+    btnReturnToLatest.addEventListener('click', () => {
+      setStep(latestStep, false);
+    });
+  }
+
+  if (btnSneakPeek) {
+    btnSneakPeek.addEventListener('click', () => {
+      setStep(1, true);
+    });
   }
 
   // ── Advanced Options Toggle ─────────────────────────────────────────────
@@ -98,7 +228,7 @@
     toggleAdvanced.addEventListener('click', () => {
       advancedContent.classList.toggle('hidden');
       const arrow = toggleAdvanced.querySelector('.toggle-arrow');
-      if (arrow) arrow.textContent = advancedContent.classList.contains('hidden') ? '▼' : '▲';
+      if (arrow) arrow.textContent = advancedContent.classList.contains('hidden') ? '\u25BC' : '\u25B2';
     });
   }
 
@@ -107,13 +237,38 @@
   const btnSendCode = document.getElementById('btnSendCode');
 
   if (formCredentials) {
+    if (isDemoMode) formCredentials.noValidate = true;
     formCredentials.addEventListener('submit', async (e) => {
       e.preventDefault();
       clearError();
 
-      const apiId = document.getElementById('apiId').value.trim();
-      const apiHash = document.getElementById('apiHash').value.trim();
-      const phoneNumber = document.getElementById('phoneNumber').value.trim();
+      const inputApiId = document.getElementById('apiId');
+      const inputApiHash = document.getElementById('apiHash');
+      const inputPhone = document.getElementById('phoneNumber');
+
+      let apiId = inputApiId.value.trim();
+      let apiHash = inputApiHash.value.trim();
+      let phoneNumber = inputPhone.value.trim();
+
+      if (isDemoMode) {
+        if (!apiId) { apiId = '1234567'; inputApiId.value = apiId; }
+        if (!apiHash) { apiHash = '0123456789abcdef0123456789abcdef'; inputApiHash.value = apiHash; }
+        if (!phoneNumber) { phoneNumber = '+1 555-0199'; inputPhone.value = phoneNumber; }
+
+        btnSendCode.disabled = true;
+        btnSendCode.innerHTML = '<span>Sending code...</span>';
+
+        setTimeout(() => {
+          btnSendCode.disabled = false;
+          btnSendCode.innerHTML = '<span>Send Login Code</span>';
+          const notice = document.getElementById('codeNotice');
+          if (notice) {
+            notice.textContent = `A verification code was sent to ${phoneNumber} (Use 12345 for demo).`;
+          }
+          setStep(2);
+        }, 400);
+        return;
+      }
 
       if (!apiId || !apiHash || !phoneNumber) {
         showError('Please provide your API ID, API Hash, and phone number.');
@@ -164,15 +319,33 @@
   let awaiting2FA = false;
 
   if (formVerifyCode) {
+    if (isDemoMode) formVerifyCode.noValidate = true;
     formVerifyCode.addEventListener('submit', async (e) => {
       e.preventDefault();
       clearError();
+
+      const inputPhoneCode = document.getElementById('phoneCode');
+
+      if (isDemoMode) {
+        if (!inputPhoneCode.value.trim()) {
+          inputPhoneCode.value = '12345';
+        }
+        btnConfirmCode.disabled = true;
+        btnConfirmCode.innerHTML = '<span>Verifying code...</span>';
+
+        setTimeout(async () => {
+          btnConfirmCode.disabled = false;
+          btnConfirmCode.innerHTML = '<span>Verify and Continue</span>';
+          await loadChannelsAndProceed();
+        }, 400);
+        return;
+      }
 
       btnConfirmCode.disabled = true;
 
       try {
         if (!awaiting2FA) {
-          const phoneCode = document.getElementById('phoneCode').value.trim();
+          const phoneCode = inputPhoneCode.value.trim();
           if (!phoneCode) {
             showError('Please enter the code sent to your Telegram app.');
             btnConfirmCode.disabled = false;
@@ -244,6 +417,46 @@
     const channelSelect = document.getElementById('channelSelect');
     channelSelect.innerHTML = '<option value="" disabled selected>Loading your channels...</option>';
 
+    if (isDemoMode) {
+      const demoChannels = [
+        { id: '-1001928374650', title: 'Lossless Music Vault', username: '@lossless_vault' },
+        { id: '-1009876543210', title: 'Dolby Atmos Masters', username: '@atmos_masters' },
+        { id: '-1005544332211', title: 'Personal Studio Audio FLACs' },
+      ];
+
+      channelSelect.innerHTML = '';
+      const defaultOpt = document.createElement('option');
+      defaultOpt.value = '';
+      defaultOpt.textContent = '-- Select your music channel --';
+      defaultOpt.disabled = true;
+      channelSelect.appendChild(defaultOpt);
+
+      for (const ch of demoChannels) {
+        const opt = document.createElement('option');
+        opt.value = ch.id;
+        const tag = ch.username ? ` (${ch.username})` : '';
+        opt.textContent = `${ch.title}${tag}`;
+        channelSelect.appendChild(opt);
+      }
+      channelSelect.selectedIndex = 1;
+
+      const manualOpt = document.createElement('option');
+      manualOpt.value = '__manual__';
+      manualOpt.textContent = 'Custom Channel ID / Username...';
+      channelSelect.appendChild(manualOpt);
+
+      channelSelect.addEventListener('change', () => {
+        const manualRow = document.getElementById('manualChannelRow');
+        if (channelSelect.value === '__manual__') {
+          manualRow.style.display = 'block';
+          document.getElementById('manualChannel').focus();
+        } else {
+          manualRow.style.display = 'none';
+        }
+      });
+      return;
+    }
+
     try {
       const res = await fetch('/api/setup/channels');
       const data = await res.json();
@@ -304,6 +517,7 @@
   }
 
   if (formLibrary) {
+    if (isDemoMode) formLibrary.noValidate = true;
     formLibrary.addEventListener('submit', async (e) => {
       e.preventDefault();
       clearError();
@@ -323,7 +537,26 @@
       const enableTunnel = document.getElementById('enableTunnel')?.checked ?? true;
       const customPublicUrl = document.getElementById('customPublicUrl')?.value.trim() || '';
       const urlSecret = document.getElementById('urlSecret').value.trim();
-      const port = document.getElementById('serverPort').value.trim();
+      const port = document.getElementById('serverPort').value.trim() || '3000';
+
+      if (isDemoMode) {
+        btnSaveConfig.disabled = true;
+        btnSaveConfig.innerHTML = enableTunnel
+          ? '<span>Simulating Cloudflare HTTPS tunnel...</span>'
+          : '<span>Saving configuration...</span>';
+
+        setTimeout(() => {
+          btnSaveConfig.disabled = false;
+          btnSaveConfig.innerHTML = '<span>Complete Setup</span>';
+          const secretPath = urlSecret ? `/${urlSecret}` : '';
+          const demoOrigin = enableTunnel
+            ? 'https://telemusic-demo.trycloudflare.com'
+            : (customPublicUrl || `http://localhost:${port}`);
+          const demoManifestUrl = `${demoOrigin}${secretPath}/manifest.json`;
+          displayFinalStep(demoManifestUrl);
+        }, 500);
+        return;
+      }
 
       btnSaveConfig.disabled = true;
       btnSaveConfig.innerHTML = enableTunnel
@@ -361,6 +594,8 @@
 
   // ── Step 4: Display Finished Addon Links & QR ───────────────────────────
   function displayFinalStep(manifestUrl) {
+    latestStep = 4;
+    maxStepReached = 4;
     setStep(4);
 
     const inputManifest = document.getElementById('manifestUrl');
@@ -402,24 +637,6 @@
     btnReconfigure.addEventListener('click', () => setStep(1));
   }
 
-  // ── Initial Status Check ────────────────────────────────────────────────
-  async function checkInitialStatus() {
-    try {
-      const res = await fetch('/api/setup/status');
-      if (!res.ok) return;
-      const data = await res.json();
-
-      if (data.configured) {
-        const proto = window.location.protocol;
-        const host = window.location.host;
-        const manifestUrl = `${proto}//${host}/manifest.json`;
-        displayFinalStep(manifestUrl);
-      }
-    } catch (_) {}
-  }
-
-  checkInitialStatus();
-
   // ── High-Precision SVG QR Code Renderer with Centered Addon Logo ─────────
   async function renderSvgQrCode(container, text) {
     container.innerHTML = '<span style="font-size:0.8125rem;color:var(--text-muted)">Generating QR...</span>';
@@ -432,4 +649,36 @@
       container.innerHTML = '<span style="font-size:0.8125rem;color:var(--text-dim)">QR unavailable</span>';
     }
   }
+
+  // ── Initial Status Check ────────────────────────────────────────────────
+  async function checkInitialStatus() {
+    if (isDemoMode) {
+      // In demo mode, start at Step 1 and allow free navigation across all steps
+      maxStepReached = 4;
+      latestStep = 1;
+      setStep(1);
+      return;
+    }
+
+    try {
+      const res = await fetch('/api/setup/status');
+      if (!res.ok) return;
+      const data = await res.json();
+
+      if (data.configured) {
+        let baseOrigin = '';
+        if (data.tunnelActive && data.tunnelUrl) {
+          baseOrigin = data.tunnelUrl;
+        } else {
+          const proto = window.location.protocol;
+          const host = window.location.host;
+          baseOrigin = `${proto}//${host}`;
+        }
+        const manifestUrl = `${baseOrigin}/manifest.json`;
+        displayFinalStep(manifestUrl);
+      }
+    } catch (_) {}
+  }
+
+  checkInitialStatus();
 })();
