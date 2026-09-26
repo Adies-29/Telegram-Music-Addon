@@ -233,7 +233,12 @@ router.post('/verify-2fa', async (req, res) => {
     const result = await activeSetup.client.signInWithPassword({
       apiId: activeSetup.apiId,
       apiHash: activeSetup.apiHash,
-    }, { password: String(password) });
+    }, {
+      password: () => String(password),
+      onError: (err) => {
+        throw err;
+      },
+    });
 
     activeSetup.sessionString = activeSetup.client.session.save();
     activeSetup.isAuthorized = true;
@@ -241,13 +246,17 @@ router.post('/verify-2fa', async (req, res) => {
     return res.json({
       ok: true,
       user: {
-        id: result.id ? result.id.toString() : null,
-        firstName: result.firstName || '',
-        username: result.username || null,
+        id: result ? (result.id ? result.id.toString() : null) : null,
+        firstName: result?.firstName || '',
+        username: result?.username || null,
       },
     });
   } catch (err) {
-    return res.status(400).json({ error: err.message || 'Invalid 2FA password' });
+    const msg = err.errorMessage || err.message || 'Invalid 2FA password';
+    if (msg.includes('PASSWORD_HASH_INVALID')) {
+      return res.status(400).json({ error: 'Incorrect 2FA password. Please check your password and try again.' });
+    }
+    return res.status(400).json({ error: msg });
   }
 });
 

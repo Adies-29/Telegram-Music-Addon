@@ -79,17 +79,6 @@ if (SESSION_STRING && SESSION_STRING[0] !== '1') {
   }
 }
 
-if (!API_ID || !API_HASH || !SESSION_STRING || !CHANNEL) {
-  console.error('----------------------------------------------------------------');
-  console.error('ERROR: Missing required environment variable in .env:');
-  if (!API_ID) console.error('  - TELEGRAM_API_ID is missing');
-  if (!API_HASH) console.error('  - TELEGRAM_API_HASH is missing');
-  if (!SESSION_STRING) console.error('  - TELEGRAM_SESSION_STRING is missing (run "npm run login" first)');
-  if (!CHANNEL) console.error('  - TELEGRAM_CHANNEL is missing (set your channel @name or ID)');
-  console.error('----------------------------------------------------------------');
-  process.exit(1);
-}
-
 const AUDIO_EXTENSIONS = ['flac', 'mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'alac', 'ec3', 'eac3'];
 const EXT_TO_FORMAT = {
   flac: 'flac',
@@ -152,11 +141,14 @@ function formatArtistForClient(artistStr) {
   return formatted.trim();
 }
 
-let client = new TelegramClient(new StringSession(SESSION_STRING || ''), API_ID || 0, API_HASH || '', {
-  connectionRetries: 5,
-  autoReconnect: true,
-});
-client.setLogLevel('error');
+let client = null;
+if (API_ID && API_HASH) {
+  client = new TelegramClient(new StringSession(SESSION_STRING || ''), API_ID, API_HASH, {
+    connectionRetries: 5,
+    autoReconnect: true,
+  });
+  client.setLogLevel('error');
+}
 
 let channelEntity = null;
 let isTelegramReady = false;
@@ -2625,11 +2617,30 @@ async function startTelegramService() {
   try {
     loadCache();
     loadNotificationState();
+
+    const env = setupApi.readEnvMap();
+    const apiId = API_ID || parseInt(env.TELEGRAM_API_ID, 10);
+    const apiHash = API_HASH || env.TELEGRAM_API_HASH;
+    const sessionString = SESSION_STRING || env.TELEGRAM_SESSION_STRING;
+
+    if (!client && apiId && apiHash) {
+      client = new TelegramClient(new StringSession(sessionString || ''), apiId, apiHash, {
+        connectionRetries: 5,
+        autoReconnect: true,
+      });
+      client.setLogLevel('error');
+    }
+
+    if (!client) {
+      console.warn('[Telegram Service] Cannot start: missing API ID or Hash.');
+      return;
+    }
+
     console.log('Connecting to Telegram MTProto...');
     await client.connect();
     console.log('Connected to Telegram!');
 
-    const currentChannel = CHANNEL || cleanEnv(process.env.TELEGRAM_CHANNEL);
+    const currentChannel = CHANNEL || cleanEnv(process.env.TELEGRAM_CHANNEL) || env.TELEGRAM_CHANNEL;
     channelEntity = await resolveChannel(currentChannel);
     console.log(`Using Telegram channel: ${channelEntity.title || channelEntity.username || currentChannel}`);
 

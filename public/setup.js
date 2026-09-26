@@ -312,8 +312,16 @@
   const twoFaPassword = document.getElementById('twoFaPassword');
   const btnBackToStep1 = document.getElementById('btnBackToStep1');
 
-  if (btnBackToStep1) {
-    btnBackToStep1.addEventListener('click', () => setStep(1));
+  const btnTogglePw = document.getElementById('btnTogglePw');
+  if (btnTogglePw && twoFaPassword) {
+    btnTogglePw.addEventListener('click', () => {
+      const isPassword = twoFaPassword.type === 'password';
+      twoFaPassword.type = isPassword ? 'text' : 'password';
+      const eyeShow = btnTogglePw.querySelector('.eye-show');
+      const eyeHide = btnTogglePw.querySelector('.eye-hide');
+      if (eyeShow) eyeShow.classList.toggle('hidden', isPassword);
+      if (eyeHide) eyeHide.classList.toggle('hidden', !isPassword);
+    });
   }
 
   let awaiting2FA = false;

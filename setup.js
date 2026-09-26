@@ -125,7 +125,10 @@ function askQuestion(rl, query, hideInput = false) {
         if (err.errorMessage === 'SESSION_PASSWORD_NEEDED') {
           console.log('\nTwo-step verification (2FA) is enabled on this account.');
           const password = await askQuestion(rl, 'Enter your 2FA password: ', true);
-          await client.signInWithPassword({ apiId, apiHash }, { password });
+          await client.signInWithPassword({ apiId, apiHash }, {
+            password: () => password,
+            onError: (err) => { throw err; },
+          });
         } else {
           throw err;
         }
