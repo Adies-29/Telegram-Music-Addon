@@ -20,8 +20,14 @@ const {
   navigateBotPicker,
 } = require('./downloader');
 
+const setupApi = require('./setup-api');
+
 const app = express();
 app.set('trust proxy', true);
+app.use(express.json());
+app.use('/public', express.static(path.join(__dirname, 'public')));
+app.use('/api/setup', setupApi.router);
+app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
 
 // WebDAV protocol discovery: intercept OPTIONS /dav before CORS ends with 204
 app.use((req, res, next) => {
@@ -145,13 +151,14 @@ function formatArtistForClient(artistStr) {
   return formatted.trim();
 }
 
-const client = new TelegramClient(new StringSession(SESSION_STRING), API_ID, API_HASH, {
+let client = new TelegramClient(new StringSession(SESSION_STRING || ''), API_ID || 0, API_HASH || '', {
   connectionRetries: 5,
   autoReconnect: true,
 });
 client.setLogLevel('error');
 
 let channelEntity = null;
+let isTelegramReady = false;
 let trackIndex = [];
 let lastIndexed = 0;
 
@@ -852,7 +859,7 @@ async function flushDigestNotifications() {
       actionLabel = item.reason === 'lower_quality' ? 'Lower Quality Removed' : 'Identical Duplicate Cleaned';
     }
 
-    text += `• <b>${item.title}</b> — <i>${item.artist}</i>\n`;
+    text += `• <b>${item.title}</b>: <i>${item.artist}</i>\n`;
     text += `  ✅ Kept: ${item.keptQuality} [${item.keptSize}]\n`;
     text += `  ❌ Deleted: ${item.deletedQuality} [${item.deletedSize}]\n`;
     text += `  <i>Reason: ${actionLabel}</i>\n\n`;
@@ -2479,8 +2486,11 @@ app.get('/debug/faststart/clear', (req, res) => {
 
 // Status / Health endpoint
 app.get('/', (req, res) => {
+  if (!isTelegramReady && !setupApi.isConfigured()) {
+    return res.redirect('/setup');
+  }
   res.json({
-    status: 'online',
+    status: isTelegramReady ? 'online' : 'setup_mode',
     version: pkg.version,
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
@@ -2609,7 +2619,8 @@ async function startBotCallbackPoller(botToken) {
   }
 }
 
-(async () => {
+async function startTelegramService() {
+  if (isTelegramReady) return;
   try {
     loadCache();
     loadNotificationState();
@@ -2617,8 +2628,9 @@ async function startBotCallbackPoller(botToken) {
     await client.connect();
     console.log('Connected to Telegram!');
 
-    channelEntity = await resolveChannel(CHANNEL);
-    console.log(`Using Telegram channel: ${channelEntity.title || channelEntity.username || CHANNEL}`);
+    const currentChannel = CHANNEL || cleanEnv(process.env.TELEGRAM_CHANNEL);
+    channelEntity = await resolveChannel(currentChannel);
+    console.log(`Using Telegram channel: ${channelEntity.title || channelEntity.username || currentChannel}`);
 
     if (teledrive) {
       await teledrive.initTeleDrive(client, channelEntity, resolveChannel);
@@ -2797,29 +2809,61 @@ async function startBotCallbackPoller(botToken) {
       }
     }, 15000);
 
+    isTelegramReady = true;
+
+    try {
+      await buildTrackIndex();
+      if (teledrive) {
+        await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
+          isAudioDocument,
+          parseTrackMessage,
+          isDuplicate,
+          trackIndex,
+          processTrackUpload,
+        });
+      }
+      checkDigestSchedule();
+    } catch (err) {
+      console.error('Initial indexing error:', err.message);
+    }
+  } catch (err) {
+    console.error('[Telegram Init Error]:', err.message);
+  }
+}
+
+(async () => {
+  try {
     app.listen(PORT, '0.0.0.0', async () => {
       console.log(`BitChord Addon server running on http://0.0.0.0:${PORT}`);
       if (URL_SECRET) {
         console.log(`Manifest URL (Secret Protected): http://localhost:${PORT}/${URL_SECRET}/manifest.json`);
-        console.log(`[Security] URL_SECRET protection active — unauthorized public requests will be blocked.`);
+        console.log(`[Security] URL_SECRET protection active: unauthorized public requests will be blocked.`);
       } else {
         console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
       }
-      try {
-        await buildTrackIndex();
-        if (teledrive) {
-          await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
-            isAudioDocument,
-            parseTrackMessage,
-            isDuplicate,
-            trackIndex,
-            processTrackUpload,
-          });
-        }
-        checkDigestSchedule();
-      } catch (err) {
-        console.error('Initial indexing error:', err.message);
+
+      const configured = setupApi.isConfigured();
+      if (configured) {
+        await startTelegramService();
+      } else {
+        console.log('=================================================================');
+        console.log('         Telegram Music Setup Required                           ');
+        console.log('=================================================================');
+        console.log(`\nOpen http://localhost:${PORT}/setup in your browser to complete onboarding.\n`);
       }
+
+      setupApi.setOnConfigSaved(async (updates) => {
+        console.log('[Setup] New configuration received. Initializing Telegram service...');
+        if (!client.connected) {
+          const parsedApiId = parseInt(updates.TELEGRAM_API_ID, 10);
+          client = new TelegramClient(new StringSession(updates.TELEGRAM_SESSION_STRING), parsedApiId, updates.TELEGRAM_API_HASH, {
+            connectionRetries: 5,
+            autoReconnect: true,
+          });
+          client.setLogLevel('error');
+        }
+        await startTelegramService();
+      });
     });
   } catch (err) {
     console.error('Fatal startup error:', err);

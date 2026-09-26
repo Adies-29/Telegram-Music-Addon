@@ -9,6 +9,7 @@
   },
   "scripts": {
     "login": "node login.js",
+    "setup": "node setup.js",
     "start": "node --max-old-space-size=128 index.js"
   },
   "dependencies": {
@@ -18,6 +19,7 @@
     "express": "^4.19.2",
     "input": "^1.0.1",
     "music-metadata": "^7.14.0",
+    "qrcode": "^1.5.4",
     "telegram": "^2.24.11"
   }
 }

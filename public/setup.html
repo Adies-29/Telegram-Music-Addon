@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram Music Setup</title>
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="stylesheet" href="/public/setup.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icon.png" alt="Telegram Music Logo" class="brand-icon" onerror="this.style.display='none'">
+        <div>
+          <h1 class="brand-title">Telegram Music</h1>
+          <p class="brand-subtitle">Telegram Music Addon Setup</p>
+        </div>
+      </div>
+      <div class="theme-controls">
+        <button type="button" class="theme-toggle" id="themeToggle" aria-label="Toggle theme mode" title="Switch theme (Auto, Dark, Light)">
+          <span class="theme-icon" id="themeIcon">🌓</span>
+          <span class="theme-label" id="themeLabel">Auto</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="wizard-card">
+      <nav class="steps-progress" aria-label="Setup steps">
+        <div class="step-indicator active" id="stepIndicator1" data-step="1">
+          <span class="step-num">1</span>
+          <span class="step-text">Telegram</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator2" data-step="2">
+          <span class="step-num">2</span>
+          <span class="step-text">Verification</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator3" data-step="3">
+          <span class="step-num">3</span>
+          <span class="step-text">Library</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator4" data-step="4">
+          <span class="step-num">4</span>
+          <span class="step-text">Connect</span>
+        </div>
+      </nav>
+
+      <div class="alert-box error hidden" id="globalError" role="alert"></div>
+
+      <!-- Step 1: Telegram Credentials -->
+      <section class="step-panel" id="panelStep1">
+        <div class="panel-header">
+          <h2>Connect Telegram</h2>
+          <p>Telegram Music streams lossless audio directly from your channel via Telegram MTProto.</p>
+        </div>
+
+        <form id="formCredentials" class="setup-form">
+          <div class="form-row">
+            <div class="form-group">
+              <label for="apiId">API ID</label>
+              <input type="text" id="apiId" name="apiId" placeholder="1234567" required autocomplete="off">
+            </div>
+            <div class="form-group">
+              <label for="apiHash">API Hash</label>
+              <input type="text" id="apiHash" name="apiHash" placeholder="0123456789abcdef0123456789abcdef" required autocomplete="off">
+            </div>
+          </div>
+
+          <div class="helper-callout">
+            <p>Need your API ID and Hash? Log in at <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a>, open <strong>API development tools</strong>, and create an app (takes 1 minute).</p>
+          </div>
+
+          <div class="form-group">
+            <label for="phoneNumber">Phone Number (with country code)</label>
+            <input type="tel" id="phoneNumber" name="phoneNumber" placeholder="+1234567890" required autocomplete="tel">
+            <span class="field-hint">Include your country calling code (e.g. +1 for US, +91 for India).</span>
+          </div>
+
+          <div class="form-actions">
+            <button type="submit" class="btn primary" id="btnSendCode">
+              <span>Send Login Code</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 2: Verification Code & 2FA -->
+      <section class="step-panel hidden" id="panelStep2">
+        <div class="panel-header">
+          <h2>Enter Telegram Code</h2>
+          <p id="codeNotice">A verification code was sent to your Telegram app.</p>
+        </div>
+
+        <form id="formVerifyCode" class="setup-form">
+          <div class="form-group">
+            <label for="phoneCode">Login Code</label>
+            <input type="text" id="phoneCode" name="phoneCode" placeholder="12345" required autocomplete="one-time-code" maxlength="10">
+            <span class="field-hint">Check your Telegram app messages for the login code.</span>
+          </div>
+
+          <div class="form-group hidden" id="twoFaContainer">
+            <label for="twoFaPassword">Two-Step Verification Password</label>
+            <input type="password" id="twoFaPassword" name="twoFaPassword" placeholder="Enter your 2FA password" autocomplete="current-password">
+            <span class="field-hint">Your account is protected by Telegram Cloud Password (2FA).</span>
+          </div>
+
+          <div class="form-actions split">
+            <button type="button" class="btn secondary" id="btnBackToStep1">Back</button>
+            <button type="submit" class="btn primary" id="btnConfirmCode">
+              <span>Verify and Continue</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 3: Library & Options -->
+      <section class="step-panel hidden" id="panelStep3">
+        <div class="panel-header">
+          <h2>Select Music Channel</h2>
+          <p>Choose the Telegram channel that holds your audio files.</p>
+        </div>
+
+        <form id="formLibrary" class="setup-form">
+          <div class="form-group">
+            <label for="channelSelect">Music Channel</label>
+            <select id="channelSelect" name="channel" required>
+              <option value="" disabled selected>Loading your channels...</option>
+            </select>
+            <span class="field-hint">Select the channel containing your FLAC, ALAC, or Dolby Atmos tracks.</span>
+          </div>
+
+          <div class="form-group" id="manualChannelRow" style="display: none;">
+            <label for="manualChannel">Or enter Channel Username / ID</label>
+            <input type="text" id="manualChannel" placeholder="@my_music_channel or -100...">
+          </div>
+
+          <div class="option-card">
+            <label class="toggle-control">
+              <input type="checkbox" id="enableBotSync" name="enableBotSync" checked>
+              <span class="toggle-track"></span>
+              <span class="toggle-label">
+                <strong>Enable @losslessfinderbot Automation</strong>
+                <span class="subtext">Auto-search, audition, and forward lossless tracks directly into your channel.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="collapsible-section">
+            <button type="button" class="collapsible-toggle" id="toggleAdvanced">
+              <span>Advanced Options (URL Secret & Port)</span>
+              <span class="toggle-arrow">▼</span>
+            </button>
+            <div class="collapsible-content hidden" id="advancedContent">
+              <div class="form-group">
+                <label for="urlSecret">URL Secret (Optional Protection)</label>
+                <input type="text" id="urlSecret" name="urlSecret" placeholder="e.g. mysecret" autocomplete="off">
+                <span class="field-hint">Adds a private prefix (e.g. /:secret/manifest.json) to prevent unauthorized public streaming.</span>
+              </div>
+              <div class="form-group">
+                <label for="serverPort">Server Port</label>
+                <input type="number" id="serverPort" name="port" value="3000" min="1024" max="65535">
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions split">
+            <button type="button" class="btn secondary" id="btnBackToStep2">Back</button>
+            <button type="submit" class="btn primary" id="btnSaveConfig">
+              <span>Complete Setup</span>
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 4: Finished & BitChord Connect -->
+      <section class="step-panel hidden" id="panelStep4">
+        <div class="panel-header center">
+          <div class="success-badge">✓</div>
+          <h2>Ready to Stream!</h2>
+          <p>Telegram Music is configured and connected to your Telegram channel.</p>
+        </div>
+
+        <div class="connection-box">
+          <div class="qr-wrapper">
+            <div id="qrCodeContainer" class="qr-canvas"></div>
+            <p class="qr-caption">Scan with BitChord on your phone</p>
+          </div>
+
+          <div class="details-wrapper">
+            <div class="url-card">
+              <label>BitChord Addon URL</label>
+              <div class="copy-input-group">
+                <input type="text" id="manifestUrl" readonly>
+                <button type="button" class="btn copy" id="btnCopyManifest">Copy</button>
+              </div>
+            </div>
+
+            <div class="instructions-card">
+              <h3>How to Add to BitChord</h3>
+              <ol>
+                <li>Open <strong>BitChord</strong> on your device.</li>
+                <li>Go to <strong>Settings</strong> &gt; <strong>Addons</strong> &gt; <strong>Add Custom Addon</strong>.</li>
+                <li>Paste the URL above or scan the QR code.</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions center">
+          <button type="button" class="btn secondary" id="btnReconfigure">Reconfigure Settings</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <p>Telegram Music Addon &bull; Lossless Streaming Engine for BitChord</p>
+    </footer>
+  </div>
+
+  <script src="/public/setup.js"></script>
+</body>
+</html>
