@@ -19,7 +19,7 @@
       </div>
       <div class="theme-controls">
         <button type="button" class="theme-toggle" id="themeToggle" aria-label="Toggle theme mode" title="Switch theme (Auto, Dark, Light)">
-          <span class="theme-icon" id="themeIcon">🌓</span>
+          <span class="theme-icon" id="themeIcon"></span>
           <span class="theme-label" id="themeLabel">Auto</span>
         </button>
       </div>
@@ -148,9 +148,20 @@
             </label>
           </div>
 
+          <div class="option-card">
+            <label class="toggle-control">
+              <input type="checkbox" id="enableTunnel" name="enableTunnel" checked>
+              <span class="toggle-track"></span>
+              <span class="toggle-label">
+                <strong>Enable Cloudflare HTTPS Tunnel</strong>
+                <span class="subtext">Creates a secure public HTTPS address so BitChord on mobile phones can stream without HTTP restrictions.</span>
+              </span>
+            </label>
+          </div>
+
           <div class="collapsible-section">
             <button type="button" class="collapsible-toggle" id="toggleAdvanced">
-              <span>Advanced Options (URL Secret & Port)</span>
+              <span>Advanced Options (URL Secret, Port & Custom Host)</span>
               <span class="toggle-arrow">▼</span>
             </button>
             <div class="collapsible-content hidden" id="advancedContent">
@@ -158,6 +169,11 @@
                 <label for="urlSecret">URL Secret (Optional Protection)</label>
                 <input type="text" id="urlSecret" name="urlSecret" placeholder="e.g. mysecret" autocomplete="off">
                 <span class="field-hint">Adds a private prefix (e.g. /:secret/manifest.json) to prevent unauthorized public streaming.</span>
+              </div>
+              <div class="form-group">
+                <label for="customPublicUrl">Custom Public Domain or Host (Optional)</label>
+                <input type="text" id="customPublicUrl" name="customPublicUrl" placeholder="https://music.yourdomain.com" autocomplete="off">
+                <span class="field-hint">Specify a custom domain if you use Tailscale Funnel, Ngrok, or your own reverse proxy.</span>
               </div>
               <div class="form-group">
                 <label for="serverPort">Server Port</label>

@@ -21,6 +21,7 @@ const {
 } = require('./downloader');
 
 const setupApi = require('./setup-api');
+const tunnel = require('./tunnel');
 
 const app = express();
 app.set('trust proxy', true);
@@ -2842,6 +2843,17 @@ async function startTelegramService() {
         console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
       }
 
+      const enableTunnel = process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true';
+      if (enableTunnel) {
+        tunnel.startTunnel(PORT).then(url => {
+          const secretPath = URL_SECRET ? `/${URL_SECRET}` : '';
+          console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+          console.log(`BitChord Addon URL (HTTPS for phone): ${url}${secretPath}/manifest.json`);
+        }).catch(err => {
+          console.warn('[Cloudflare Tunnel Warning]:', err.message);
+        });
+      }
+
       const configured = setupApi.isConfigured();
       if (configured) {
         await startTelegramService();
@@ -2861,6 +2873,15 @@ async function startTelegramService() {
             autoReconnect: true,
           });
           client.setLogLevel('error');
+        }
+        if (updates.ENABLE_CLOUDFLARE_TUNNEL === 'true') {
+          tunnel.startTunnel(parseInt(updates.PORT || PORT, 10)).then(url => {
+            const secretPath = (updates.URL_SECRET || URL_SECRET) ? `/${updates.URL_SECRET || URL_SECRET}` : '';
+            console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+            console.log(`BitChord Addon URL (HTTPS for phone): ${url}${secretPath}/manifest.json`);
+          }).catch(err => {
+            console.warn('[Cloudflare Tunnel Warning]:', err.message);
+          });
         }
         await startTelegramService();
       });

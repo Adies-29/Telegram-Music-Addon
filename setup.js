@@ -4,6 +4,7 @@ const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { readEnvMap, writeEnvKeys } = require('./setup-api');
+const tunnel = require('./tunnel');
 
 function askQuestion(rl, query, hideInput = false) {
   return new Promise((resolve) => {
@@ -189,6 +190,9 @@ function askQuestion(rl, query, hideInput = false) {
     const secretAns = await askQuestion(rl, `URL Secret protection (press Enter for none, or type secret) [current: ${existingSecret || 'none'}]: `);
     const urlSecret = secretAns !== '' ? secretAns : existingSecret;
 
+    const tunnelAns = await askQuestion(rl, 'Enable Cloudflare HTTPS Tunnel for mobile BitChord? (Y/n): ');
+    const enableTunnel = !tunnelAns || tunnelAns.toLowerCase().startsWith('y');
+
     const updates = {
       TELEGRAM_API_ID: apiId.toString(),
       TELEGRAM_API_HASH: apiHash,
@@ -196,9 +200,21 @@ function askQuestion(rl, query, hideInput = false) {
       TELEGRAM_CHANNEL: selectedChannel,
       PORT: port,
       ENABLE_BOT_SYNC: enableBotSync ? 'true' : 'false',
+      ENABLE_CLOUDFLARE_TUNNEL: enableTunnel ? 'true' : 'false',
     };
     if (urlSecret) {
       updates.URL_SECRET = urlSecret;
+    }
+
+    let tunnelUrl = '';
+    if (enableTunnel) {
+      console.log('\nConnecting Cloudflare HTTPS Tunnel for mobile streaming...');
+      try {
+        tunnelUrl = await tunnel.startTunnel(parseInt(port, 10));
+        console.log(`[✔] HTTPS Tunnel active: ${tunnelUrl}`);
+      } catch (e) {
+        console.log(`[!] Cloudflare Tunnel warning: ${e.message}`);
+      }
     }
 
     writeEnvKeys(updates);
@@ -208,8 +224,15 @@ function askQuestion(rl, query, hideInput = false) {
     console.log('=================================================================\n');
 
     const secretPath = updates.URL_SECRET ? `/${updates.URL_SECRET}` : '';
-    console.log('Your BitChord Addon URL:');
-    console.log(`  http://localhost:${port}${secretPath}/manifest.json\n`);
+    if (tunnelUrl) {
+      console.log('Your BitChord Addon URL (HTTPS for phone):');
+      console.log(`  ${tunnelUrl}${secretPath}/manifest.json\n`);
+      console.log('Local Network URL (for PC / LAN):');
+      console.log(`  http://localhost:${port}${secretPath}/manifest.json\n`);
+    } else {
+      console.log('Your BitChord Addon URL:');
+      console.log(`  http://localhost:${port}${secretPath}/manifest.json\n`);
+    }
     console.log('Configuration saved to .env. You can now start Telegram Music with:');
     console.log('  npm start\n');
 

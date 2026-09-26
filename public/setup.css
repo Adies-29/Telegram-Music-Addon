@@ -180,6 +180,26 @@ body {
   color: var(--text-main);
 }
 
+.theme-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-muted);
+  transition: color var(--transition-fast);
+}
+
+.theme-icon svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+}
+
+.theme-toggle:hover .theme-icon {
+  color: var(--accent);
+}
+
 .wizard-card {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);

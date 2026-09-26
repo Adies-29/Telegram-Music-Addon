@@ -5,6 +5,7 @@ const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const QRCode = require('qrcode');
+const tunnel = require('./tunnel');
 
 const router = express.Router();
 const envPath = path.join(__dirname, '.env');
@@ -97,7 +98,29 @@ router.get('/status', (req, res) => {
     channel: env.TELEGRAM_CHANNEL || null,
     port: parseInt(env.PORT || '3000', 10),
     hasSecret: Boolean(env.URL_SECRET || env.ACCESS_TOKEN),
+    tunnelActive: Boolean(tunnel.getTunnelUrl()),
+    tunnelUrl: tunnel.getTunnelUrl(),
+    tunnelInstalled: tunnel.isInstalled(),
   });
+});
+
+router.get('/tunnel', (req, res) => {
+  res.json({
+    active: Boolean(tunnel.getTunnelUrl()),
+    url: tunnel.getTunnelUrl(),
+    isInstalled: tunnel.isInstalled(),
+  });
+});
+
+router.post('/tunnel', async (req, res) => {
+  const env = readEnvMap();
+  const port = parseInt(req.body.port || env.PORT || '3000', 10);
+  try {
+    const url = await tunnel.startTunnel(port);
+    res.json({ ok: true, url });
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Failed to start tunnel' });
+  }
 });
 
 router.post('/send-code', async (req, res) => {
@@ -287,7 +310,7 @@ router.post('/save', async (req, res) => {
     return res.status(400).json({ error: 'Telegram session not authorized' });
   }
 
-  const { channel, teledriveChannel, enableBotSync, urlSecret, port } = req.body || {};
+  const { channel, teledriveChannel, enableBotSync, enableTunnel, customPublicUrl, urlSecret, port } = req.body || {};
 
   if (!channel) {
     return res.status(400).json({ error: 'Music channel is required' });
@@ -313,13 +336,37 @@ router.post('/save', async (req, res) => {
     if (enableBotSync !== undefined) {
       updates.ENABLE_BOT_SYNC = enableBotSync ? 'true' : 'false';
     }
+    if (enableTunnel !== undefined) {
+      updates.ENABLE_CLOUDFLARE_TUNNEL = enableTunnel ? 'true' : 'false';
+    }
+    if (customPublicUrl && String(customPublicUrl).trim()) {
+      updates.PUBLIC_URL = String(customPublicUrl).trim().replace(/\/+$/, '');
+    }
 
     writeEnvKeys(updates);
 
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-    const host = req.headers['x-forwarded-host'] || req.get('host') || `localhost:${updates.PORT || '3000'}`;
+    let baseOrigin = '';
+    if (enableTunnel) {
+      try {
+        const tunnelUrl = await tunnel.startTunnel(parseInt(updates.PORT || '3000', 10));
+        baseOrigin = tunnelUrl;
+      } catch (tunnelErr) {
+        console.warn('Could not auto-start Cloudflare tunnel:', tunnelErr.message);
+      }
+    }
+
+    if (!baseOrigin && updates.PUBLIC_URL) {
+      baseOrigin = updates.PUBLIC_URL;
+    }
+
+    if (!baseOrigin) {
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+      const host = req.headers['x-forwarded-host'] || req.get('host') || `localhost:${updates.PORT || '3000'}`;
+      baseOrigin = `${proto}://${host}`;
+    }
+
     const secretPath = updates.URL_SECRET ? `/${updates.URL_SECRET}` : '';
-    const manifestUrl = `${proto}://${host}${secretPath}/manifest.json`;
+    const manifestUrl = `${baseOrigin}${secretPath}/manifest.json`;
 
     if (typeof onConfigSavedCallback === 'function') {
       setTimeout(() => {
@@ -334,6 +381,7 @@ router.post('/save', async (req, res) => {
         channel: updates.TELEGRAM_CHANNEL,
         hasSecret: Boolean(updates.URL_SECRET),
         port: updates.PORT || '3000',
+        hasTunnel: Boolean(enableTunnel),
       },
     });
   } catch (err) {
