@@ -22,6 +22,21 @@ const {
 
 const app = express();
 app.set('trust proxy', true);
+
+// WebDAV protocol discovery: intercept OPTIONS /dav before CORS ends with 204
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS' && (req.path.includes('/dav') || req.url.includes('/dav'))) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS, PROPFIND');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('DAV', '1, 2');
+    res.setHeader('MS-Author-Via', 'DAV');
+    res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+    return res.status(200).end();
+  }
+  next();
+});
+
 app.use(cors());
 
 function cleanEnv(val) {
@@ -1298,7 +1313,7 @@ if (URL_SECRET) {
       return next();
     }
 
-    // Also support secret via query param or authorization header
+    // Also support secret via query param or authorization header (Bearer or Basic)
     if (
       req.query.secret === URL_SECRET ||
       req.headers['x-secret-token'] === URL_SECRET ||
@@ -1306,6 +1321,24 @@ if (URL_SECRET) {
     ) {
       req.secretPrefix = URL_SECRET;
       return next();
+    }
+
+    if (req.headers.authorization && req.headers.authorization.startsWith('Basic ')) {
+      try {
+        const credentials = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf8');
+        const [user, pass] = credentials.split(':');
+        if (user === URL_SECRET || pass === URL_SECRET) {
+          req.secretPrefix = '';
+          return next();
+        }
+      } catch (_) {}
+    }
+
+    // For WebDAV clients accessing /dav without credentials, challenge with Basic Auth
+    const isWebDavPath = req.url === '/dav' || req.url.startsWith('/dav/') || req.url.startsWith('/dav?');
+    if (isWebDavPath) {
+      res.setHeader('WWW-Authenticate', 'Basic realm="TeleMusic WebDAV"');
+      return res.status(401).send('Unauthorized: WebDAV requires authentication');
     }
 
     console.warn(`[Security] Blocked unauthorized request to ${req.originalUrl || req.url} from ${req.ip}`);
@@ -1953,7 +1986,7 @@ app.get('/artwork/:id', async (req, res) => {
   }
 });
 
-app.get('/audio/:id', async (req, res) => {
+async function streamAudioTrack(trackId, req, res) {
   const reqStart = Date.now();
   let isConnectionClosed = false;
   let iterator = null;
@@ -1969,18 +2002,18 @@ app.get('/audio/:id', async (req, res) => {
   });
 
   try {
-    const track = findTrack(req.params.id);
+    const track = findTrack(trackId);
     if (!track) return res.status(404).send('Track not found');
 
-    const media = await getMediaForTrack(req.params.id);
+    const media = await getMediaForTrack(trackId);
     if (!media) return res.status(404).send('Media not found');
 
     if (isConnectionClosed) return;
 
     // If a background pre-warm is currently running for this track, cancel it to prevent duplicate MTProto downloads
-    if (inFlightPrewarmIters.has(req.params.id)) {
-      const bgIter = inFlightPrewarmIters.get(req.params.id);
-      inFlightPrewarmIters.delete(req.params.id);
+    if (inFlightPrewarmIters.has(trackId)) {
+      const bgIter = inFlightPrewarmIters.get(trackId);
+      inFlightPrewarmIters.delete(trackId);
       if (bgIter) {
         bgIter.left = 0;
         if (typeof bgIter.close === 'function') bgIter.close().catch(() => {});
@@ -1989,7 +2022,7 @@ app.get('/audio/:id', async (req, res) => {
 
     const totalSize = Number(track.sizeBytes) || Number(media.document?.size) || 0;
     if (!totalSize || isNaN(totalSize)) {
-      console.error(`Invalid totalSize for track ${req.params.id}`);
+      console.error(`Invalid totalSize for track ${trackId}`);
       return res.status(500).send('Unable to determine audio file size');
     }
     if (!track.sizeBytes) {
@@ -2047,7 +2080,7 @@ app.get('/audio/:id', async (req, res) => {
     recordRequest({
       timestamp: new Date().toISOString(),
       type: 'audio',
-      id: req.params.id,
+      id: trackId,
       range: range || 'none',
       bytes: `${start}-${end}/${totalSize}`,
       bytesNeeded,
@@ -2062,6 +2095,10 @@ app.get('/audio/:id', async (req, res) => {
     res.setHeader('Content-Length', bytesNeeded);
     if (isRange) {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+    }
+
+    if (req.method === 'HEAD') {
+      return res.end();
     }
 
     // Telegram MTProto upload.GetFile requires chunk size limits to be powers of 2 (64KB, 128KB, 256KB, 512KB)
@@ -2080,12 +2117,11 @@ app.get('/audio/:id', async (req, res) => {
       req.once('close', onClose);
     });
 
-    const cachedPreamble = fastStartCache.get(req.params.id);
+    const cachedPreamble = fastStartCache.get(trackId);
     const isPreambleStart = (start === 0 || start === 65536);
     const useFastStart = isPreambleStart && cachedPreamble && (start < cachedPreamble.length);
 
     if (useFastStart) {
-      // 1. Immediately flush cached preamble from RAM (<5ms start)
       const preambleSlice = cachedPreamble.slice(start, Math.min(cachedPreamble.length, start + bytesNeeded));
       const canContinue = res.write(preambleSlice);
       bytesSent += preambleSlice.length;
@@ -2094,7 +2130,6 @@ app.get('/audio/:id', async (req, res) => {
         await waitForDrain();
       }
 
-      // If the request was completely satisfied by preamble (e.g. 64KB audition probe)
       if (bytesSent >= bytesNeeded) {
         if (!res.writableEnded && !isConnectionClosed) {
           res.end();
@@ -2103,7 +2138,7 @@ app.get('/audio/:id', async (req, res) => {
       }
     }
 
-    // 2. Stream remaining bytes live from Telegram MTProto
+    // Stream remaining bytes live from Telegram MTProto
     let currentMedia = media;
     let hasRefreshedRef = false;
     const preambleChunks = [];
@@ -2125,9 +2160,8 @@ app.get('/audio/:id', async (req, res) => {
             break;
           }
 
-          // On cache miss at start === 0, capture the first 512KB for future instant playback
           if (start === 0 && !useFastStart && preambleBytesCollected < FAST_START_BYTES) {
-            if (fastStartCache.has(req.params.id)) {
+            if (fastStartCache.has(trackId)) {
               preambleBytesCollected = FAST_START_BYTES;
               preambleChunks.length = 0;
             } else {
@@ -2136,10 +2170,10 @@ app.get('/audio/:id', async (req, res) => {
               preambleBytesCollected += Math.min(chunk.length, needed);
               if (preambleBytesCollected >= FAST_START_BYTES || preambleBytesCollected >= totalSize) {
                 const fullPreamble = Buffer.concat(preambleChunks);
-                fastStartCache.set(req.params.id, fullPreamble);
+                fastStartCache.set(trackId, fullPreamble);
                 const capturedKb = Math.round(fullPreamble.length / 1024);
                 const trackTitle = track?.title || 'track';
-                console.log(`[FastStart] Captured ${capturedKb} KB preamble for "${trackTitle}" (ID: ${req.params.id})`);
+                console.log(`[FastStart] Captured ${capturedKb} KB preamble for "${trackTitle}" (ID: ${trackId})`);
               }
             }
           }
@@ -2157,7 +2191,6 @@ app.get('/audio/:id', async (req, res) => {
             shouldBreak = true;
           }
 
-          // Handle backpressure: pause pulling chunks if client network buffer is full
           const canContinue = res.write(toSend);
           if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
             await waitForDrain();
@@ -2169,15 +2202,15 @@ app.get('/audio/:id', async (req, res) => {
             break;
           }
         }
-        break; // Successfully finished streaming range
+        break;
       } catch (iterErr) {
         if (!hasRefreshedRef && isFileReferenceError(iterErr)) {
           hasRefreshedRef = true;
-          console.warn(`[FileRef] File reference expired for "${track.title}" (ID: ${req.params.id}). Refreshing from Telegram cloud...`);
-          const freshMedia = await getMediaForTrack(req.params.id, true);
+          console.warn(`[FileRef] File reference expired for "${track.title}" (ID: ${trackId}). Refreshing from Telegram cloud...`);
+          const freshMedia = await getMediaForTrack(trackId, true);
           if (freshMedia) {
             currentMedia = freshMedia;
-            console.log(`[FileRef] Refreshed file reference for "${track.title}" (ID: ${req.params.id}). Resuming stream from byte ${start + bytesSent}...`);
+            console.log(`[FileRef] Refreshed file reference for "${track.title}" (ID: ${trackId}). Resuming stream from byte ${start + bytesSent}...`);
             continue;
           }
         }
@@ -2190,11 +2223,162 @@ app.get('/audio/:id', async (req, res) => {
     }
   } catch (err) {
     if (!isConnectionClosed && !res.destroyed) {
-      console.error(`Audio stream error for track ${req.params.id}:`, err.message);
+      console.error(`Audio stream error for track ${trackId}:`, err.message);
       if (!res.headersSent) res.status(500).send(err.message);
       else res.end();
     }
   }
+}
+
+app.get('/audio/:id', (req, res) => streamAudioTrack(req.params.id, req, res));
+app.head('/audio/:id', (req, res) => streamAudioTrack(req.params.id, req, res));
+
+// ── WebDAV Protocol Implementation (/dav) ───────────────────────────────────
+
+function sanitizeWebDavName(name) {
+  return String(name || '')
+    .replace(/[/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getTrackWebDavFileName(track) {
+  const ext = track.format === 'flac' ? 'flac' : (track.format === 'alac' ? 'm4a' : (track.isAtmos || track.format === 'eac3-joc' ? 'm4a' : (track.format || 'flac')));
+  const artist = sanitizeWebDavName(track.artist || 'Unknown Artist');
+  const title = sanitizeWebDavName(track.title || 'Untitled');
+  return `${artist} - ${title} [${track.id}].${ext}`;
+}
+
+function getTrackIdFromWebDavPath(urlPath) {
+  if (!urlPath) return null;
+  const decoded = decodeURIComponent(urlPath);
+  const matchBracket = decoded.match(/\[(\d+)\]\.[a-zA-Z0-9]+$/);
+  if (matchBracket) return matchBracket[1];
+  const matchIdExt = decoded.match(/(?:^|\/)(\d+)\.[a-zA-Z0-9]+$/);
+  if (matchIdExt) return matchIdExt[1];
+  const matchDirect = decoded.match(/(?:^|\/)(\d+)$/);
+  if (matchDirect) return matchDirect[1];
+  return null;
+}
+
+function escapeXml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+app.all(['/dav', '/dav/*'], async (req, res) => {
+  const method = req.method.toUpperCase();
+  const basePrefix = req.secretPrefix ? `/${req.secretPrefix}` : '';
+
+  if (method === 'OPTIONS') {
+    res.setHeader('DAV', '1, 2');
+    res.setHeader('MS-Author-Via', 'DAV');
+    res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+    return res.status(200).end();
+  }
+
+  // Extract relative sub-path after /dav or /dav/
+  let subPath = req.path.replace(/^\/dav\/?/, '');
+  try {
+    subPath = decodeURIComponent(subPath);
+  } catch (_) {}
+
+  if (method === 'PROPFIND') {
+    res.setHeader('DAV', '1, 2');
+    const depth = req.headers.depth || '1';
+
+    // Root collection request: /dav or /dav/
+    if (!subPath) {
+      let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+      xml += `  <D:response>\n`;
+      xml += `    <D:href>${basePrefix}/dav/</D:href>\n`;
+      xml += `    <D:propstat>\n`;
+      xml += `      <D:prop>\n`;
+      xml += `        <D:resourcetype><D:collection/></D:resourcetype>\n`;
+      xml += `        <D:displayname>TeleMusic Library</D:displayname>\n`;
+      xml += `        <D:getlastmodified>${new Date().toUTCString()}</D:getlastmodified>\n`;
+      xml += `      </D:prop>\n`;
+      xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+      xml += `    </D:propstat>\n`;
+      xml += `  </D:response>\n`;
+
+      if (depth !== '0') {
+        for (const track of trackIndex) {
+          const fileName = getTrackWebDavFileName(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+          const sizeBytes = track.sizeBytes || 0;
+          const mimeType = track.isAtmos ? 'audio/mp4' : (track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream'));
+          xml += `  <D:response>\n`;
+          xml += `    <D:href>${itemHref}</D:href>\n`;
+          xml += `    <D:propstat>\n`;
+          xml += `      <D:prop>\n`;
+          xml += `        <D:resourcetype/>\n`;
+          xml += `        <D:displayname>${escapeXml(fileName)}</D:displayname>\n`;
+          xml += `        <D:getcontentlength>${sizeBytes}</D:getcontentlength>\n`;
+          xml += `        <D:getcontenttype>${mimeType}</D:getcontenttype>\n`;
+          xml += `        <D:getetag>&quot;${track.id}-${sizeBytes}&quot;</D:getetag>\n`;
+          xml += `        <D:getlastmodified>Sat, 26 Sep 2026 00:00:00 GMT</D:getlastmodified>\n`;
+          xml += `      </D:prop>\n`;
+          xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+          xml += `    </D:propstat>\n`;
+          xml += `  </D:response>\n`;
+        }
+      }
+
+      xml += `</D:multistatus>`;
+      return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+    }
+
+    // Specific file PROPFIND: /dav/Artist - Title [123].flac
+    const trackId = getTrackIdFromWebDavPath(subPath);
+    const track = trackId ? findTrack(trackId) : null;
+    if (!track) {
+      return res.status(404).send('Not found');
+    }
+
+    const fileName = getTrackWebDavFileName(track);
+    const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+    const sizeBytes = track.sizeBytes || 0;
+    const mimeType = track.isAtmos ? 'audio/mp4' : (track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream'));
+    let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+    xml += `  <D:response>\n`;
+    xml += `    <D:href>${itemHref}</D:href>\n`;
+    xml += `    <D:propstat>\n`;
+    xml += `      <D:prop>\n`;
+    xml += `        <D:resourcetype/>\n`;
+    xml += `        <D:displayname>${escapeXml(fileName)}</D:displayname>\n`;
+    xml += `        <D:getcontentlength>${sizeBytes}</D:getcontentlength>\n`;
+    xml += `        <D:getcontenttype>${mimeType}</D:getcontenttype>\n`;
+    xml += `        <D:getetag>&quot;${track.id}-${sizeBytes}&quot;</D:getetag>\n`;
+    xml += `        <D:getlastmodified>Sat, 26 Sep 2026 00:00:00 GMT</D:getlastmodified>\n`;
+    xml += `      </D:prop>\n`;
+    xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+    xml += `    </D:propstat>\n`;
+    xml += `  </D:response>\n`;
+    xml += `</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+  }
+
+  if (method === 'GET' || method === 'HEAD') {
+    if (!subPath) {
+      if (method === 'HEAD') return res.status(200).end();
+      return res.send(`TeleMusic WebDAV Server is active. ${trackIndex.length} tracks available.`);
+    }
+
+    const trackId = getTrackIdFromWebDavPath(subPath);
+    if (!trackId) {
+      return res.status(404).send('File not found in library');
+    }
+
+    return streamAudioTrack(trackId, req, res);
+  }
+
+  res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+  return res.status(405).send('Method Not Allowed');
 });
 
 // Manual refresh endpoint

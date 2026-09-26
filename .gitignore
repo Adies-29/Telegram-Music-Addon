@@ -18,3 +18,4 @@ notification_state.json
 tracks_cache.json
 *.bak
 teledrive.js
+teledrive_state.json
