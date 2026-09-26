@@ -294,14 +294,14 @@ function getBaseUrl(req) {
   return `${proto}://${host}${prefix}`;
 }
 
-async function getHeaderChunk(media, maxBytes = 128 * 1024) {
+async function getMediaChunk(media, offset = 0, maxBytes = 128 * 1024) {
   const chunks = [];
   let downloaded = 0;
   try {
     const iter = client.iterDownload({
       file: media,
-      offset: bigInt(0),
-      requestSize: 64 * 1024,
+      offset: bigInt(offset),
+      requestSize: Math.min(maxBytes, 64 * 1024),
     });
     for await (const chunk of iter) {
       chunks.push(chunk);
@@ -316,6 +316,51 @@ async function getHeaderChunk(media, maxBytes = 128 * 1024) {
   } catch (_) {
     return null;
   }
+}
+
+function getHeaderChunk(media, maxBytes = 128 * 1024) {
+  return getMediaChunk(media, 0, maxBytes);
+}
+
+function hasEac3SyncWords(buf) {
+  if (!buf || buf.length < 200) return false;
+  for (let i = 0; i < buf.length - 200; i++) {
+    if (buf[i] === 0x0b && buf[i + 1] === 0x77) {
+      const strmtyp = (buf[i + 2] >> 6) & 0x03;
+      if (strmtyp <= 2) {
+        const frmsiz = ((buf[i + 2] & 0x07) << 8) | buf[i + 3];
+        const frameBytes = (frmsiz + 1) * 2;
+        if (frameBytes >= 96 && frameBytes <= 4096 && (i + frameBytes + 1) < buf.length) {
+          if (buf[i + frameBytes] === 0x0b && buf[i + frameBytes + 1] === 0x77) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function parseMp4Duration(buf) {
+  if (!buf || buf.length < 32) return undefined;
+  const idx = buf.indexOf('mvhd');
+  if (idx === -1 || idx + 24 > buf.length) return undefined;
+  try {
+    const version = buf.readUInt8(idx + 4);
+    let timescale, durationVal;
+    if (version === 0 && idx + 24 <= buf.length) {
+      timescale = buf.readUInt32BE(idx + 16);
+      durationVal = buf.readUInt32BE(idx + 20);
+    } else if (version === 1 && idx + 36 <= buf.length) {
+      timescale = buf.readUInt32BE(idx + 24);
+      durationVal = Number(buf.readBigUInt64BE(idx + 28));
+    }
+    if (timescale && durationVal) {
+      const sec = Math.round(durationVal / timescale);
+      if (sec > 0 && sec < 86400) return sec;
+    }
+  } catch (_) {}
+  return undefined;
 }
 
 const inFlightPrewarms = new Set();
@@ -422,10 +467,37 @@ async function parseTrackMessage(msg, cacheMedia = true) {
       if (headerBuf && headerBuf.length > 0) {
         if (isMp4Container) {
           const headerStr = headerBuf.toString('latin1');
-          if (headerStr.includes('ec-3') || headerStr.includes('dec3')) {
+          if (headerStr.includes('ec-3') || headerStr.includes('dec3') || headerStr.includes('damf') || headerStr.includes('SpatialAudio')) {
             hasEc3Atom = true;
           } else if (headerStr.includes('alac')) {
             hasAlacAtom = true;
+          }
+
+          if (!hasEc3Atom && hasEac3SyncWords(headerBuf)) {
+            hasEc3Atom = true;
+          }
+
+          if (!duration) {
+            const mvhdDur = parseMp4Duration(headerBuf);
+            if (mvhdDur) duration = mvhdDur;
+          }
+
+          // If moov atom was not in the first 128KB, probe the last 128KB where moov sits in non-faststart MP4s
+          if ((!hasEc3Atom || !duration) && sizeBytes > 128 * 1024 && !headerStr.includes('moov')) {
+            const tailBytes = Math.min(128 * 1024, sizeBytes);
+            const tailBuf = await getMediaChunk(msg.media, sizeBytes - tailBytes, tailBytes);
+            if (tailBuf && tailBuf.length > 0) {
+              const tailStr = tailBuf.toString('latin1');
+              if (tailStr.includes('ec-3') || tailStr.includes('dec3') || tailStr.includes('damf') || tailStr.includes('SpatialAudio')) {
+                hasEc3Atom = true;
+              } else if (tailStr.includes('alac')) {
+                hasAlacAtom = true;
+              }
+              if (!duration) {
+                const tailDur = parseMp4Duration(tailBuf);
+                if (tailDur) duration = tailDur;
+              }
+            }
           }
         }
         const parsed = await mm.parseBuffer(headerBuf, undefined, {
@@ -452,7 +524,23 @@ async function parseTrackMessage(msg, cacheMedia = true) {
     } catch (_) {}
   }
 
+  // Cross-reference duration from existing copy in library if still unknown
+  if (!duration) {
+    const existingMatch = trackIndex.find((t) => t.duration && (
+      (isrc && t.isrc && t.isrc === isrc) ||
+      (t.title && title && normalizeTitle(t.title) === normalizeTitle(title))
+    ));
+    if (existingMatch && existingMatch.duration) {
+      duration = existingMatch.duration;
+    }
+  }
+
   const msgText = (msg.message || msg.text || '');
+  let rawKbps = 0;
+  if (sizeBytes && duration) {
+    rawKbps = Math.round((sizeBytes * 8) / (duration * 1000));
+  }
+
   const isAtmos = Boolean(
     hasEc3Atom ||
     ATMOS_REGEX.test(fileName) ||
@@ -460,17 +548,15 @@ async function parseTrackMessage(msg, cacheMedia = true) {
     ATMOS_REGEX.test(title) ||
     (parsedCodec && ATMOS_REGEX.test(parsedCodec)) ||
     ext === 'ec3' ||
-    ext === 'eac3'
+    ext === 'eac3' ||
+    (isMp4Container && rawKbps >= 650 && rawKbps <= 950 && !hasAlacAtom)
   );
 
   let formatName = EXT_TO_FORMAT[resolvedExt] || resolvedExt;
-  let rawKbps = 0;
-  if (sizeBytes && duration) {
-    rawKbps = Math.round((sizeBytes * 8) / (duration * 1000));
-  }
-
   if (isAtmos) {
     formatName = 'eac3-joc';
+    if (!sampleRate) sampleRate = 48000;
+    if (!bitDepth) bitDepth = 16;
   } else if (formatName === 'm4a' && (hasAlacAtom || parsedCodec === 'ALAC' || rawKbps > 500)) {
     formatName = 'alac';
     if (!bitDepth) bitDepth = rawKbps > 2000 ? 24 : 16;
@@ -485,7 +571,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
   } else if (['flac', 'wav', 'alac'].includes(formatName)) {
     qualityText = `16-bit / 44.1kHz ${formatName.toUpperCase()} Lossless`;
   } else {
-    qualityText = `${formatName.toUpperCase()} (${Math.min(rawKbps || 320, 320)}kbps)`;
+    qualityText = `${formatName.toUpperCase()} (${rawKbps || 320}kbps)`;
   }
 
   const keep = msgText.toLowerCase().includes('/keep') || msgText.toLowerCase().includes('/ig') || msgText.toLowerCase().includes('#keep');
@@ -512,7 +598,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
 }
 
 function getQualityScore(track) {
-  if (track.isAtmos) {
+  if (track.isAtmos || track.format === 'eac3-joc' || track.quality === 'Dolby Atmos') {
     return 9000000 + (track.sizeBytes || 0);
   }
 
@@ -543,7 +629,7 @@ function formatBytes(bytes) {
 }
 
 function describeTrackQuality(track) {
-  if (track.isAtmos) {
+  if (track.isAtmos || track.format === 'eac3-joc' || track.quality === 'Dolby Atmos') {
     return 'Dolby Atmos';
   }
   const fmt = (track.format || 'mp3').toUpperCase();
@@ -594,7 +680,9 @@ function isDuplicate(a, b) {
   if (a.id === b.id) return false;
 
   // Preserve both Dolby Atmos and stereo mixes
-  if (Boolean(a.isAtmos) !== Boolean(b.isAtmos)) {
+  const isAtmosA = Boolean(a.isAtmos || a.format === 'eac3-joc' || a.quality === 'Dolby Atmos');
+  const isAtmosB = Boolean(b.isAtmos || b.format === 'eac3-joc' || b.quality === 'Dolby Atmos');
+  if (isAtmosA !== isAtmosB) {
     return false;
   }
 
