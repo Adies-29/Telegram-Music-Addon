@@ -312,22 +312,28 @@ function getBaseUrl(req) {
 async function getMediaChunk(media, offset = 0, maxBytes = 128 * 1024) {
   const chunks = [];
   let downloaded = 0;
+  const blockSize = 64 * 1024;
+  const alignedOffset = Math.floor(offset / blockSize) * blockSize;
+  let skipBytes = offset - alignedOffset;
+  const totalToFetch = skipBytes + maxBytes;
+
   try {
     const iter = client.iterDownload({
       file: media,
-      offset: bigInt(offset),
-      requestSize: Math.min(maxBytes, 64 * 1024),
+      offset: bigInt(alignedOffset),
+      requestSize: blockSize,
     });
     for await (const chunk of iter) {
       chunks.push(chunk);
       downloaded += chunk.length;
-      if (downloaded >= maxBytes) {
+      if (downloaded >= totalToFetch) {
         iter.left = 0;
-        await iter.close();
+        await iter.close().catch(() => {});
         break;
       }
     }
-    return Buffer.concat(chunks).slice(0, maxBytes);
+    const combined = Buffer.concat(chunks);
+    return combined.slice(skipBytes, skipBytes + maxBytes);
   } catch (_) {
     return null;
   }
@@ -2101,11 +2107,9 @@ async function streamAudioTrack(trackId, req, res) {
       return res.end();
     }
 
-    // Telegram MTProto upload.GetFile requires chunk size limits to be powers of 2 (64KB, 128KB, 256KB, 512KB)
-    let dynamicBlockSize = 512 * 1024;
-    if (bytesNeeded <= 64 * 1024) dynamicBlockSize = 64 * 1024;
-    else if (bytesNeeded <= 128 * 1024) dynamicBlockSize = 128 * 1024;
-    else if (bytesNeeded <= 256 * 1024) dynamicBlockSize = 256 * 1024;
+    // Telegram MTProto upload.GetFile requires requestSize to be a power of 2 (up to 512KB)
+    // and offset MUST be an exact multiple of requestSize (offset % requestSize === 0).
+    const dynamicBlockSize = 512 * 1024;
 
     // Fast-Start RAM cache check
     let bytesSent = 0;
@@ -2145,10 +2149,14 @@ async function streamAudioTrack(trackId, req, res) {
     let preambleBytesCollected = 0;
 
     while (bytesSent < bytesNeeded && !isConnectionClosed && !res.writableEnded && !res.destroyed) {
-      const liveOffset = start + bytesSent;
+      const currentBytePos = start + bytesSent;
+      // Align request offset to dynamicBlockSize boundary to prevent MTProto 400: OFFSET_INVALID
+      const alignedOffset = Math.floor(currentBytePos / dynamicBlockSize) * dynamicBlockSize;
+      let skipBytes = currentBytePos - alignedOffset;
+
       iterator = client.iterDownload({
         file: currentMedia,
-        offset: bigInt(liveOffset),
+        offset: bigInt(alignedOffset),
         requestSize: dynamicBlockSize,
       });
 
@@ -2160,29 +2168,36 @@ async function streamAudioTrack(trackId, req, res) {
             break;
           }
 
-          if (start === 0 && !useFastStart && preambleBytesCollected < FAST_START_BYTES) {
-            if (fastStartCache.has(trackId)) {
-              preambleBytesCollected = FAST_START_BYTES;
-              preambleChunks.length = 0;
-            } else {
-              const needed = FAST_START_BYTES - preambleBytesCollected;
-              preambleChunks.push(chunk.slice(0, needed));
-              preambleBytesCollected += Math.min(chunk.length, needed);
-              if (preambleBytesCollected >= FAST_START_BYTES || preambleBytesCollected >= totalSize) {
-                const fullPreamble = Buffer.concat(preambleChunks);
-                fastStartCache.set(trackId, fullPreamble);
-                const capturedKb = Math.round(fullPreamble.length / 1024);
-                const trackTitle = track?.title || 'track';
-                console.log(`[FastStart] Captured ${capturedKb} KB preamble for "${trackTitle}" (ID: ${trackId})`);
-              }
+          // Populate fastStartCache from the very beginning of the track if captured
+          if (alignedOffset === 0 && !fastStartCache.has(trackId) && preambleBytesCollected < FAST_START_BYTES) {
+            const needed = FAST_START_BYTES - preambleBytesCollected;
+            preambleChunks.push(chunk.slice(0, needed));
+            preambleBytesCollected += Math.min(chunk.length, needed);
+            if (preambleBytesCollected >= FAST_START_BYTES || preambleBytesCollected >= totalSize) {
+              const fullPreamble = Buffer.concat(preambleChunks);
+              fastStartCache.set(trackId, fullPreamble);
+              const capturedKb = Math.round(fullPreamble.length / 1024);
+              const trackTitle = track?.title || 'track';
+              console.log(`[FastStart] Captured ${capturedKb} KB preamble for "${trackTitle}" (ID: ${trackId})`);
             }
           }
 
-          let toSend = chunk;
+          // Discard unaligned preamble if currentBytePos was not on a block boundary
+          let usableChunk = chunk;
+          if (skipBytes > 0) {
+            if (chunk.length <= skipBytes) {
+              skipBytes -= chunk.length;
+              continue;
+            }
+            usableChunk = chunk.slice(skipBytes);
+            skipBytes = 0;
+          }
+
+          let toSend = usableChunk;
           let shouldBreak = false;
 
-          if (bytesSent + chunk.length > bytesNeeded) {
-            toSend = chunk.slice(0, bytesNeeded - bytesSent);
+          if (bytesSent + usableChunk.length > bytesNeeded) {
+            toSend = usableChunk.slice(0, bytesNeeded - bytesSent);
             shouldBreak = true;
           }
 
@@ -2343,188 +2358,55 @@ app.all(['/dav', '/dav/*'], async (req, res) => {
     res.setHeader('DAV', '1, 2');
     const depth = req.headers.depth || '1';
 
-    // 1. Root collection: /dav
-    if (segments.length === 0) {
+    // Root collection request: /dav or /dav/
+    if (!subPath) {
       let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-      xml += buildWebDavCollectionXml(`${basePrefix}/dav/`, 'TeleMusic Library');
+      xml += `  <D:response>\n`;
+      xml += `    <D:href>${basePrefix}/dav/</D:href>\n`;
+      xml += `    <D:propstat>\n`;
+      xml += `      <D:prop>\n`;
+      xml += `        <D:resourcetype><D:collection/></D:resourcetype>\n`;
+      xml += `        <D:displayname>TeleMusic Library</D:displayname>\n`;
+      xml += `        <D:getlastmodified>${new Date().toUTCString()}</D:getlastmodified>\n`;
+      xml += `      </D:prop>\n`;
+      xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+      xml += `    </D:propstat>\n`;
+      xml += `  </D:response>\n`;
 
       if (depth !== '0') {
-        // Expose the 3 main organized virtual folders
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/Artists/`, 'By Artists');
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/Dolby%20Atmos/`, 'Dolby Atmos');
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/All%20Songs/`, 'All Songs');
+        for (const track of trackIndex) {
+          const fileName = getTrackWebDavFileName(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+          xml += buildWebDavFileXml(itemHref, fileName, track);
+        }
       }
 
       xml += `</D:multistatus>`;
       return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
     }
 
-    const firstSeg = segments[0];
-
-    // 2. /dav/Artists or /dav/Artists/...
-    if (firstSeg === 'Artists') {
-      // 2a. Root of Artists collection: lists all individual artist folders
-      if (segments.length === 1) {
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/Artists/`, 'By Artists');
-
-        if (depth !== '0') {
-          const artistMap = getWebDavArtistMap();
-          const sortedArtists = Array.from(artistMap.keys()).sort((a, b) => a.localeCompare(b));
-          for (const artist of sortedArtists) {
-            xml += buildWebDavCollectionXml(`${basePrefix}/dav/Artists/${encodeURIComponent(artist)}/`, artist);
-          }
-        }
-
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-
-      // 2b. Specific Artist folder: /dav/Artists/<ArtistName>
-      if (segments.length === 2) {
-        const artistName = segments[1];
-        const artistMap = getWebDavArtistMap();
-        const tracks = artistMap.get(artistName) || [];
-
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/Artists/${encodeURIComponent(artistName)}/`, artistName);
-
-        if (depth !== '0') {
-          for (const track of tracks) {
-            const fileName = getTrackWebDavFileName(track);
-            const itemHref = `${basePrefix}/dav/Artists/${encodeURIComponent(artistName)}/${encodeURIComponent(fileName)}`;
-            xml += buildWebDavFileXml(itemHref, fileName, track);
-          }
-        }
-
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-
-      // 2c. Specific track inside an artist folder: /dav/Artists/<ArtistName>/<FileName>
-      if (segments.length === 3) {
-        const fileName = segments[2];
-        const trackId = getTrackIdFromWebDavPath(fileName);
-        const track = trackId ? findTrack(trackId) : null;
-        if (!track) return res.status(404).send('Not found');
-
-        const canonicalName = getTrackWebDavFileName(track);
-        const itemHref = `${basePrefix}/dav/Artists/${encodeURIComponent(segments[1])}/${encodeURIComponent(canonicalName)}`;
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavFileXml(itemHref, canonicalName, track);
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-    }
-
-    // 3. /dav/Dolby Atmos or /dav/Dolby Atmos/...
-    if (firstSeg === 'Dolby Atmos') {
-      const atmosTracks = trackIndex.filter(t => t.isAtmos || t.format === 'eac3-joc');
-
-      // 3a. Collection listing
-      if (segments.length === 1) {
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/Dolby%20Atmos/`, 'Dolby Atmos');
-
-        if (depth !== '0') {
-          for (const track of atmosTracks) {
-            const fileName = getTrackWebDavFileName(track);
-            const itemHref = `${basePrefix}/dav/Dolby%20Atmos/${encodeURIComponent(fileName)}`;
-            xml += buildWebDavFileXml(itemHref, fileName, track);
-          }
-        }
-
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-
-      // 3b. Specific file inside Dolby Atmos
-      if (segments.length === 2) {
-        const fileName = segments[1];
-        const trackId = getTrackIdFromWebDavPath(fileName);
-        const track = trackId ? findTrack(trackId) : null;
-        if (!track) return res.status(404).send('Not found');
-
-        const canonicalName = getTrackWebDavFileName(track);
-        const itemHref = `${basePrefix}/dav/Dolby%20Atmos/${encodeURIComponent(canonicalName)}`;
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavFileXml(itemHref, canonicalName, track);
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-    }
-
-    // 4. /dav/All Songs or /dav/All Songs/...
-    if (firstSeg === 'All Songs') {
-      // 4a. Collection listing
-      if (segments.length === 1) {
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavCollectionXml(`${basePrefix}/dav/All%20Songs/`, 'All Songs');
-
-        if (depth !== '0') {
-          for (const track of trackIndex) {
-            const fileName = getTrackWebDavFileName(track);
-            const itemHref = `${basePrefix}/dav/All%20Songs/${encodeURIComponent(fileName)}`;
-            xml += buildWebDavFileXml(itemHref, fileName, track);
-          }
-        }
-
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-
-      // 4b. Specific file inside All Songs
-      if (segments.length === 2) {
-        const fileName = segments[1];
-        const trackId = getTrackIdFromWebDavPath(fileName);
-        const track = trackId ? findTrack(trackId) : null;
-        if (!track) return res.status(404).send('Not found');
-
-        const canonicalName = getTrackWebDavFileName(track);
-        const itemHref = `${basePrefix}/dav/All%20Songs/${encodeURIComponent(canonicalName)}`;
-        let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-        xml += buildWebDavFileXml(itemHref, canonicalName, track);
-        xml += `</D:multistatus>`;
-        return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
-      }
-    }
-
-    // 5. Fallback: Direct file PROPFIND at root (/dav/Artist - Title [123].flac) for backwards compatibility
+    // Specific file PROPFIND: /dav/Artist - Title [123].flac (or within subfolder if any client queries)
     const trackId = getTrackIdFromWebDavPath(subPath);
     const track = trackId ? findTrack(trackId) : null;
-    if (track) {
-      const fileName = getTrackWebDavFileName(track);
-      const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
-      let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
-      xml += buildWebDavFileXml(itemHref, fileName, track);
-      xml += `</D:multistatus>`;
-      return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+    if (!track) {
+      return res.status(404).send('Not found');
     }
 
-    return res.status(404).send('Not found');
+    const fileName = getTrackWebDavFileName(track);
+    const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+    let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+    xml += buildWebDavFileXml(itemHref, fileName, track);
+    xml += `</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
   }
 
   if (method === 'GET' || method === 'HEAD') {
-    if (segments.length === 0) {
+    if (!subPath) {
       if (method === 'HEAD') return res.status(200).end();
-      return res.send(`TeleMusic WebDAV Server is active. ${trackIndex.length} tracks available in Artists, Dolby Atmos, and All Songs.`);
+      return res.send(`TeleMusic WebDAV Server is active. ${trackIndex.length} tracks available.`);
     }
 
-    // If request is pointing at a directory collection
-    if (
-      segments.length === 1 &&
-      (firstSeg === 'Artists' || firstSeg === 'Dolby Atmos' || firstSeg === 'All Songs')
-    ) {
-      if (method === 'HEAD') return res.status(200).end();
-      return res.send(`Directory: ${firstSeg}`);
-    }
-    if (segments.length === 2 && firstSeg === 'Artists') {
-      if (method === 'HEAD') return res.status(200).end();
-      return res.send(`Artist Directory: ${segments[1]}`);
-    }
-
-    // The last segment in the path is the file name
-    const targetFile = segments[segments.length - 1];
+    const targetFile = segments.length > 0 ? segments[segments.length - 1] : subPath;
     const trackId = getTrackIdFromWebDavPath(targetFile) || getTrackIdFromWebDavPath(subPath);
     if (!trackId) {
       return res.status(404).send('File not found in library');
