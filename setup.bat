@@ -6,9 +6,15 @@ echo ===================================================
 echo             Telegram Music Addon Setup
 echo ===================================================
 echo.
-echo Launching setup...
-echo.
 
-node setup.js
+if not exist node_modules (
+    echo Installing dependencies...
+    call npm install
+)
+
+echo Starting server and opening setup wizard in browser...
+echo.
+set "OPEN_BROWSER=true"
+call npm start
 
 pause

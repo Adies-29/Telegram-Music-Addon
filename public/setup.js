@@ -1,97 +1,17 @@
 (function () {
   'use strict';
 
-  // ── Theme Switcher (Auto, Dark, Light) ──────────────────────────────────
-  const THEME_STORAGE_KEY = 'telemusic_theme';
-  const themeToggle = document.getElementById('themeToggle');
-  const themeIcon = document.getElementById('themeIcon');
-  const themeLabel = document.getElementById('themeLabel');
+  // ── Permanent Dark Theme ────────────────────────────────────────────────
+  document.documentElement.setAttribute('data-theme', 'dark');
+  localStorage.setItem('telemusic_theme', 'dark');
 
-  const THEMES = ['auto', 'dark', 'light'];
-  const THEME_DATA = {
-    auto: {
-      label: 'Auto',
-      svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18v-18z" fill="currentColor"/></svg>',
-    },
-    dark: {
-      label: 'Dark',
-      svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
-    },
-    light: {
-      label: 'Light',
-      svg: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>',
-    },
-  };
-
-  function applyTheme(theme) {
-    if (!THEMES.includes(theme)) theme = 'auto';
-    document.documentElement.setAttribute('data-theme', theme);
-    if (themeLabel) themeLabel.textContent = THEME_DATA[theme].label;
-    if (themeIcon) themeIcon.innerHTML = THEME_DATA[theme].svg;
-    localStorage.setItem(THEME_STORAGE_KEY, theme);
-  }
-
-  function cycleTheme() {
-    const current = localStorage.getItem(THEME_STORAGE_KEY) || 'auto';
-    const nextIdx = (THEMES.indexOf(current) + 1) % THEMES.length;
-    applyTheme(THEMES[nextIdx]);
-  }
-
-  if (themeToggle) {
-    themeToggle.addEventListener('click', cycleTheme);
-  }
-  applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'auto');
-
-  // ── Demo Mode Detection ─────────────────────────────────────────────────
-  const urlParams = new URLSearchParams(window.location.search);
-  const isDemoMode = urlParams.get('demo') === 'true' || urlParams.get('demo') === '1';
-
-  const demoToggle = document.getElementById('demoToggle');
-  const demoToggleLabel = document.getElementById('demoToggleLabel');
-  const demoBanner = document.getElementById('demoBanner');
-  const btnExitDemo = document.getElementById('btnExitDemo');
-
-  if (demoToggle) {
-    if (isDemoMode) {
-      demoToggle.classList.add('active');
-      if (demoToggleLabel) demoToggleLabel.textContent = 'Exit Demo';
-      demoToggle.title = 'Click to exit demo mode and return to real setup';
-    } else {
-      demoToggle.classList.remove('active');
-      if (demoToggleLabel) demoToggleLabel.textContent = 'Demo Mode';
-      demoToggle.title = 'Click to try interactive demo walkthrough';
-    }
-
-    demoToggle.addEventListener('click', () => {
-      if (isDemoMode) {
-        window.location.href = window.location.pathname;
-      } else {
-        window.location.href = window.location.pathname + '?demo=true';
-      }
-    });
-  }
-
-  if (btnExitDemo) {
-    btnExitDemo.addEventListener('click', () => {
-      window.location.href = window.location.pathname;
-    });
-  }
-
-  if (isDemoMode && demoBanner) {
-    demoBanner.classList.remove('hidden');
-  }
-
-  // ── Step Navigation & Sneak Peek State ───────────────────────────────────
+  // ── Step Navigation & State ─────────────────────────────────────────────
   let currentStep = 1;
-  let maxStepReached = isDemoMode ? 4 : 1;
-  let latestStep = 1;
-
-  const STEP_NAMES = {
-    1: 'Telegram Credentials',
-    2: 'Code Verification',
-    3: 'Music Library',
-    4: 'Connect BitChord',
-  };
+  let isConfiguredLocked = false;
+  let serverConfigData = null;
+  let newCodeRequested = false;
+  let awaiting2FA = false;
+  let channelsLoaded = false;
 
   const panels = {
     1: document.getElementById('panelStep1'),
@@ -106,10 +26,6 @@
     4: document.getElementById('stepIndicator4'),
   };
   const globalError = document.getElementById('globalError');
-  const sneakPeekBar = document.getElementById('sneakPeekBar');
-  const sneakPeekText = document.getElementById('sneakPeekText');
-  const btnReturnToLatest = document.getElementById('btnReturnToLatest');
-  const btnSneakPeek = document.getElementById('btnSneakPeek');
 
   function showError(msg) {
     if (!globalError) return;
@@ -128,39 +44,39 @@
   }
 
   function updateStepIndicators() {
+    const dividers = document.querySelectorAll('.step-divider');
+
     for (let i = 1; i <= 4; i++) {
       const el = indicators[i];
       if (!el) continue;
 
-      el.classList.remove('active', 'completed', 'clickable');
+      const numEl = el.querySelector('.step-num');
+      el.classList.remove('active', 'completed');
 
       if (i < currentStep) {
         el.classList.add('completed');
+        if (numEl) numEl.textContent = '✓';
       } else if (i === currentStep) {
-        el.classList.add('active');
-      }
-
-      if (i <= maxStepReached || isDemoMode) {
-        el.classList.add('clickable');
-        el.setAttribute('tabindex', '0');
-        el.setAttribute('role', 'button');
+        if (currentStep === 4) {
+          el.classList.add('completed');
+          if (numEl) numEl.textContent = '✓';
+        } else {
+          el.classList.add('active');
+          if (numEl) numEl.textContent = String(i);
+        }
       } else {
-        el.removeAttribute('tabindex');
-        el.removeAttribute('role');
+        if (numEl) numEl.textContent = String(i);
       }
     }
+
+    dividers.forEach((divider, idx) => {
+      divider.classList.toggle('completed', idx < currentStep - 1);
+    });
   }
 
-  function setStep(step, isSneakPeek = false) {
+  function setStep(step) {
     currentStep = step;
     clearError();
-
-    if (step > maxStepReached) {
-      maxStepReached = step;
-    }
-    if (!isSneakPeek && step > latestStep) {
-      latestStep = step;
-    }
 
     for (let i = 1; i <= 4; i++) {
       if (panels[i]) {
@@ -171,196 +87,412 @@
 
     updateStepIndicators();
 
-    // Sneak Peek Bar logic
-    if (sneakPeekBar) {
-      if (latestStep > currentStep) {
-        sneakPeekBar.classList.remove('hidden');
-        if (sneakPeekText) {
-          sneakPeekText.textContent = `Viewing Step ${step}: ${STEP_NAMES[step] || ''}`;
-        }
-        if (btnReturnToLatest) {
-          btnReturnToLatest.textContent = `Return to Step ${latestStep} (${STEP_NAMES[latestStep] || ''}) \u2192`;
-        }
-      } else {
-        sneakPeekBar.classList.add('hidden');
-      }
+    if (step === 2) {
+      updateStep2NextState();
+    }
+
+    // Auto-fetch channels when navigating to Step 3
+    if (step === 3) {
+      initChannelInput();
+    }
+
+    if (step === 4) {
+      ensureStep4Rendered();
     }
   }
 
-  // Step indicator click listener for sneak peeking
-  for (let i = 1; i <= 4; i++) {
-    const ind = indicators[i];
-    if (ind) {
-      ind.addEventListener('click', () => {
-        if (i <= maxStepReached || isDemoMode) {
-          const isPeeking = i < latestStep;
-          setStep(i, isPeeking);
-        }
-      });
-      ind.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          if (i <= maxStepReached || isDemoMode) {
-            const isPeeking = i < latestStep;
-            setStep(i, isPeeking);
-          }
-        }
+  // ── Lock & Unlock Configuration State ───────────────────────────────────
+  function setConfigurationLock(locked) {
+    isConfiguredLocked = locked;
+
+    const inputsToLock = [
+      document.getElementById('apiId'),
+      document.getElementById('apiHash'),
+      document.getElementById('phoneNumber'),
+      document.getElementById('phoneCode'),
+      document.getElementById('twoFaPassword'),
+      document.getElementById('channelInput'),
+      document.getElementById('enableBotSync'),
+      document.getElementById('botToken'),
+      document.getElementById('enableTunnel'),
+      document.getElementById('urlSecret'),
+      document.getElementById('customPublicUrl'),
+      document.getElementById('serverPort'),
+    ];
+
+    inputsToLock.forEach((input) => {
+      if (!input) return;
+      input.disabled = locked;
+      input.dataset.locked = locked ? 'true' : 'false';
+      const formGroup = input.closest('.form-group');
+      if (formGroup) formGroup.classList.toggle('is-locked', locked);
+      const optionCard = input.closest('.option-card');
+      if (optionCard) optionCard.classList.toggle('is-locked', locked);
+    });
+
+    const toggleAdvanced = document.getElementById('toggleAdvanced');
+    if (toggleAdvanced) {
+      toggleAdvanced.disabled = locked;
+    }
+    const advancedSection = document.getElementById('advancedSection');
+    if (advancedSection) {
+      advancedSection.classList.toggle('is-locked', locked);
+    }
+
+    if (locked) {
+      document.querySelectorAll('.masked-credential').forEach((input) => {
+        input.type = 'password';
       });
     }
   }
 
-  if (btnReturnToLatest) {
-    btnReturnToLatest.addEventListener('click', () => {
-      setStep(latestStep, false);
-    });
+  // ── Navigation Buttons & Form Handlers ──────────────────────────────────
+  const btnStep1Next = document.getElementById('btnStep1Next');
+  const btnStep2Back = document.getElementById('btnStep2Back');
+  const btnStep2Next = document.getElementById('btnStep2Next');
+  const btnStep3Back = document.getElementById('btnStep3Back');
+  const btnStep3Next = document.getElementById('btnStep3Next');
+  const btnStep4Back = document.getElementById('btnStep4Back');
+  const btnReconfigure = document.getElementById('btnReconfigure');
+
+  // Prevent default submit on all forms
+  ['formCredentials', 'formVerifyCode', 'formLibrary'].forEach((formId) => {
+    const f = document.getElementById(formId);
+    if (f) f.addEventListener('submit', (e) => e.preventDefault());
+  });
+
+  function hasCredentialsChanged() {
+    if (!serverConfigData) return true;
+    const inputApiId = document.getElementById('apiId');
+    const inputApiHash = document.getElementById('apiHash');
+    const inputPhone = document.getElementById('phoneNumber');
+
+    const curId = inputApiId ? inputApiId.value.trim() : '';
+    const curHash = inputApiHash ? inputApiHash.value.trim() : '';
+    const curPhone = typeof getFullPhoneNumber === 'function' ? getFullPhoneNumber() : (inputPhone ? inputPhone.value.trim() : '');
+
+    return curId !== (serverConfigData.apiId || '') ||
+           curHash !== (serverConfigData.apiHash || '') ||
+           (serverConfigData.phoneNumber && curPhone !== serverConfigData.phoneNumber);
   }
 
-  if (btnSneakPeek) {
-    btnSneakPeek.addEventListener('click', () => {
-      setStep(1, true);
-    });
-  }
-
-  // ── Advanced Options Toggle ─────────────────────────────────────────────
-  const toggleAdvanced = document.getElementById('toggleAdvanced');
-  const advancedContent = document.getElementById('advancedContent');
-  if (toggleAdvanced && advancedContent) {
-    toggleAdvanced.addEventListener('click', () => {
-      advancedContent.classList.toggle('hidden');
-      const arrow = toggleAdvanced.querySelector('.toggle-arrow');
-      if (arrow) arrow.textContent = advancedContent.classList.contains('hidden') ? '\u25BC' : '\u25B2';
-    });
-  }
-
-  // ── Step 1: Submit Credentials ──────────────────────────────────────────
-  const formCredentials = document.getElementById('formCredentials');
-  const btnSendCode = document.getElementById('btnSendCode');
-
-  if (formCredentials) {
-    if (isDemoMode) formCredentials.noValidate = true;
-    formCredentials.addEventListener('submit', async (e) => {
-      e.preventDefault();
+  // Step 1: Next (no back button on Step 1)
+  if (btnStep1Next) {
+    btnStep1Next.addEventListener('click', () => {
       clearError();
 
       const inputApiId = document.getElementById('apiId');
       const inputApiHash = document.getElementById('apiHash');
+
+      const apiId = inputApiId ? inputApiId.value.trim() : '';
+      const apiHash = inputApiHash ? inputApiHash.value.trim() : '';
+
+      if (!apiId || !apiHash) {
+        showError('Please provide both your API ID and API Hash.');
+        return;
+      }
+
+      sessionStorage.setItem('setup_apiId', apiId);
+      sessionStorage.setItem('setup_apiHash', apiHash);
+
+      setStep(2);
       const inputPhone = document.getElementById('phoneNumber');
-
-      let apiId = inputApiId.value.trim();
-      let apiHash = inputApiHash.value.trim();
-      let phoneNumber = inputPhone.value.trim();
-
-      if (isDemoMode) {
-        if (!apiId) { apiId = '1234567'; inputApiId.value = apiId; }
-        if (!apiHash) { apiHash = '0123456789abcdef0123456789abcdef'; inputApiHash.value = apiHash; }
-        if (!phoneNumber) { phoneNumber = '+1 555-0199'; inputPhone.value = phoneNumber; }
-
-        btnSendCode.disabled = true;
-        btnSendCode.innerHTML = '<span>Sending code...</span>';
-
-        setTimeout(() => {
-          btnSendCode.disabled = false;
-          btnSendCode.innerHTML = '<span>Send Login Code</span>';
-          const notice = document.getElementById('codeNotice');
-          if (notice) {
-            notice.textContent = `A verification code was sent to ${phoneNumber} (Use 12345 for demo).`;
-          }
-          setStep(2);
-        }, 400);
-        return;
-      }
-
-      if (!apiId || !apiHash || !phoneNumber) {
-        showError('Please provide your API ID, API Hash, and phone number.');
-        return;
-      }
-
-      btnSendCode.disabled = true;
-      btnSendCode.innerHTML = '<span>Sending code...</span>';
-
-      try {
-        const res = await fetch('/api/setup/send-code', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiId, apiHash, phoneNumber }),
-        });
-        const data = await res.json();
-
-        if (!res.ok || !data.ok) {
-          throw new Error(data.error || 'Failed to send login code.');
-        }
-
-        const notice = document.getElementById('codeNotice');
-        if (notice) {
-          notice.textContent = `A verification code was sent to ${phoneNumber}.`;
-        }
-
-        setStep(2);
-      } catch (err) {
-        showError(err.message || 'Error communicating with Telegram.');
-      } finally {
-        btnSendCode.disabled = false;
-        btnSendCode.innerHTML = '<span>Send Login Code</span>';
+      if (inputPhone && !inputPhone.value) {
+        inputPhone.focus();
       }
     });
   }
 
-  // ── Step 2: Verify Code & 2FA ───────────────────────────────────────────
-  const formVerifyCode = document.getElementById('formVerifyCode');
-  const btnConfirmCode = document.getElementById('btnConfirmCode');
-  const twoFaContainer = document.getElementById('twoFaContainer');
-  const twoFaPassword = document.getElementById('twoFaPassword');
-  const btnBackToStep1 = document.getElementById('btnBackToStep1');
+  // ── Step 2 Phone & OTP Controller ──────────────────────────────────────
+  function getFullPhoneNumber() {
+    const phoneInput = document.getElementById('phoneNumber');
+    if (!phoneInput) return '';
 
-  const btnTogglePw = document.getElementById('btnTogglePw');
-  if (btnTogglePw && twoFaPassword) {
-    btnTogglePw.addEventListener('click', () => {
-      const isPassword = twoFaPassword.type === 'password';
-      twoFaPassword.type = isPassword ? 'text' : 'password';
-      const eyeShow = btnTogglePw.querySelector('.eye-show');
-      const eyeHide = btnTogglePw.querySelector('.eye-hide');
-      if (eyeShow) eyeShow.classList.toggle('hidden', isPassword);
-      if (eyeHide) eyeHide.classList.toggle('hidden', !isPassword);
-    });
+    let raw = phoneInput.value.trim();
+    if (!raw) return '';
+
+    if (raw.startsWith('+')) {
+      return '+' + raw.replace(/\D/g, '');
+    }
+
+    const digits = raw.replace(/\D/g, '');
+    return digits ? '+' + digits : '';
   }
 
-  let awaiting2FA = false;
+  function setPhoneInputFromFull(fullPhone) {
+    if (!fullPhone) return;
+    const phoneInput = document.getElementById('phoneNumber');
+    if (!phoneInput) return;
+    phoneInput.value = String(fullPhone).trim();
+  }
 
-  if (formVerifyCode) {
-    if (isDemoMode) formVerifyCode.noValidate = true;
-    formVerifyCode.addEventListener('submit', async (e) => {
+  // ── OTP Slots Controller ────────────────────────────────────────────────
+  const otpSlots = Array.from(document.querySelectorAll('.otp-slot'));
+  const hiddenPhoneCode = document.getElementById('phoneCode');
+
+  function getOtpValue() {
+    return otpSlots.map((s) => s.value).join('');
+  }
+
+  function updateStep2NextState() {
+    if (!btnStep2Next) return;
+    if (isConfiguredLocked || (serverConfigData && serverConfigData.configured && !hasCredentialsChanged() && !newCodeRequested)) {
+      btnStep2Next.disabled = false;
+      return;
+    }
+    if (awaiting2FA) {
+      const twoFaInput = document.getElementById('twoFaPassword');
+      btnStep2Next.disabled = !(twoFaInput && twoFaInput.value.trim());
+      return;
+    }
+    const otpSection = document.getElementById('otpSection');
+    const isOtpVisible = otpSection && !otpSection.classList.contains('hidden');
+    if (isOtpVisible || newCodeRequested) {
+      btnStep2Next.disabled = getOtpValue().length !== otpSlots.length;
+    } else {
+      btnStep2Next.disabled = false;
+    }
+  }
+
+  function syncOtpToHidden() {
+    const val = getOtpValue();
+    if (hiddenPhoneCode) hiddenPhoneCode.value = val;
+    updateStep2NextState();
+    return val;
+  }
+
+  function clearOtpSlots() {
+    otpSlots.forEach((s) => {
+      s.value = '';
+      s.classList.remove('filled');
+    });
+    syncOtpToHidden();
+  }
+
+  otpSlots.forEach((slot, idx) => {
+    slot.addEventListener('input', () => {
+      const val = slot.value.replace(/\D/g, '');
+      slot.value = val.slice(-1);
+      slot.classList.toggle('filled', Boolean(slot.value));
+
+      syncOtpToHidden();
+
+      if (slot.value && idx < otpSlots.length - 1) {
+        otpSlots[idx + 1].focus();
+        otpSlots[idx + 1].select();
+      }
+
+      if (getOtpValue().length === otpSlots.length) {
+        const nextBtn = document.getElementById('btnStep2Next');
+        if (nextBtn) nextBtn.click();
+      }
+    });
+
+    slot.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace') {
+        if (!slot.value && idx > 0) {
+          otpSlots[idx - 1].focus();
+          otpSlots[idx - 1].value = '';
+          otpSlots[idx - 1].classList.remove('filled');
+          syncOtpToHidden();
+        } else {
+          slot.value = '';
+          slot.classList.remove('filled');
+          syncOtpToHidden();
+        }
+      } else if (e.key === 'ArrowLeft' && idx > 0) {
+        otpSlots[idx - 1].focus();
+      } else if (e.key === 'ArrowRight' && idx < otpSlots.length - 1) {
+        otpSlots[idx + 1].focus();
+      }
+    });
+
+    slot.addEventListener('paste', (e) => {
       e.preventDefault();
+      const pasteText = (e.clipboardData || window.clipboardData).getData('text') || '';
+      const digits = pasteText.replace(/\D/g, '').slice(0, otpSlots.length);
+      if (!digits) return;
+
+      digits.split('').forEach((d, i) => {
+        if (otpSlots[i]) {
+          otpSlots[i].value = d;
+          otpSlots[i].classList.add('filled');
+        }
+      });
+
+      const nextFocus = Math.min(digits.length, otpSlots.length - 1);
+      if (otpSlots[nextFocus]) otpSlots[nextFocus].focus();
+
+      syncOtpToHidden();
+
+      if (digits.length === otpSlots.length) {
+        const nextBtn = document.getElementById('btnStep2Next');
+        if (nextBtn) nextBtn.click();
+      }
+    });
+  });
+
+  // ── Resend Countdown Timer ──────────────────────────────────────────────
+  let resendCountdownTimer = null;
+  function startResendCountdown(seconds = 60) {
+    if (resendCountdownTimer) clearInterval(resendCountdownTimer);
+    const btnResend = document.getElementById('btnResendCode');
+    const noticeText = document.getElementById('resendNoticeText');
+    if (!btnResend) return;
+
+    btnResend.disabled = true;
+    let remaining = seconds;
+    if (noticeText) noticeText.textContent = "Didn't get the code?";
+    btnResend.innerHTML = `Resend in <span id="resendTimer">${remaining}</span>s`;
+
+    resendCountdownTimer = setInterval(() => {
+      remaining -= 1;
+      const t = document.getElementById('resendTimer');
+      if (t) t.textContent = String(remaining);
+      if (remaining <= 0) {
+        clearInterval(resendCountdownTimer);
+        resendCountdownTimer = null;
+        btnResend.disabled = false;
+        btnResend.textContent = 'Resend Code';
+      }
+    }, 1000);
+  }
+
+  // ── Step 2 Telegram Code Request Helper ─────────────────────────────────
+  async function requestTelegramCode() {
+    clearError();
+    const inputApiId = document.getElementById('apiId');
+    const inputApiHash = document.getElementById('apiHash');
+
+    const apiId = inputApiId ? inputApiId.value.trim() : (serverConfigData?.apiId || '');
+    const apiHash = inputApiHash ? inputApiHash.value.trim() : (serverConfigData?.apiHash || '');
+    const phoneNumber = getFullPhoneNumber();
+
+    if (!apiId || !apiHash) {
+      showError('Missing API credentials. Please go back to Step 1.');
+      return false;
+    }
+    if (!phoneNumber) {
+      showError('Please enter your phone number with country code (e.g. +1... or +91...).');
+      const p = document.getElementById('phoneNumber');
+      if (p) p.focus();
+      return false;
+    }
+    if (phoneNumber.replace(/\D/g, '').length < 6) {
+      showError('Please enter a valid phone number including country code (e.g. +91 9876543210).');
+      const p = document.getElementById('phoneNumber');
+      if (p) p.focus();
+      return false;
+    }
+
+    sessionStorage.setItem('setup_phoneNumber', phoneNumber);
+
+    const btnSend = document.getElementById('btnSendCode');
+    if (btnSend) {
+      btnSend.disabled = true;
+      btnSend.innerHTML = '<span>Sending code...</span>';
+    }
+
+    try {
+      const res = await fetch('/api/setup/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiId, apiHash, phoneNumber }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Failed to send login code.');
+      }
+
+      newCodeRequested = true;
+      const notice = document.getElementById('codeNotice');
+      if (notice) {
+        notice.textContent = `A verification code was sent to ${phoneNumber}.`;
+      }
+
+      if (btnSend) {
+        btnSend.innerHTML = '<span>✓ Code Sent</span>';
+      }
+
+      // Reveal Stage 2 (OTP Slots)
+      const otpSection = document.getElementById('otpSection');
+      if (otpSection) {
+        otpSection.classList.remove('hidden');
+      }
+
+      startResendCountdown(60);
+      updateStep2NextState();
+
+      // Focus first OTP slot
+      if (otpSlots[0]) {
+        otpSlots[0].focus();
+      }
+      return true;
+    } catch (err) {
+      showError(err.message || 'Error communicating with Telegram.');
+      if (btnSend) {
+        btnSend.disabled = false;
+        btnSend.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 6px;"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg><span>Send Code</span>';
+      }
+      return false;
+    }
+  }
+
+  // Step 2: Back and Next
+  if (btnStep2Back) {
+    btnStep2Back.addEventListener('click', () => setStep(1));
+  }
+
+  const btnSendCode = document.getElementById('btnSendCode');
+  if (btnSendCode) {
+    btnSendCode.addEventListener('click', requestTelegramCode);
+  }
+
+  const btnResendCode = document.getElementById('btnResendCode');
+  if (btnResendCode) {
+    btnResendCode.addEventListener('click', () => {
+      if (!btnResendCode.disabled) {
+        clearOtpSlots();
+        requestTelegramCode();
+      }
+    });
+  }
+
+  if (btnStep2Next) {
+    btnStep2Next.addEventListener('click', async () => {
       clearError();
 
-      const inputPhoneCode = document.getElementById('phoneCode');
-
-      if (isDemoMode) {
-        if (!inputPhoneCode.value.trim()) {
-          inputPhoneCode.value = '12345';
-        }
-        btnConfirmCode.disabled = true;
-        btnConfirmCode.innerHTML = '<span>Verifying code...</span>';
-
-        setTimeout(async () => {
-          btnConfirmCode.disabled = false;
-          btnConfirmCode.innerHTML = '<span>Verify and Continue</span>';
-          await loadChannelsAndProceed();
-        }, 400);
+      // If locked or already configured and no new credentials were changed and no new code was requested: move to Step 3
+      if (isConfiguredLocked || (serverConfigData && serverConfigData.configured && !hasCredentialsChanged() && !newCodeRequested)) {
+        setStep(3);
         return;
       }
 
-      btnConfirmCode.disabled = true;
+      const phoneCode = syncOtpToHidden();
+
+      // If code was not yet requested and phoneCode is empty: automatically send the code
+      if (!newCodeRequested && !phoneCode) {
+        const sent = await requestTelegramCode();
+        if (sent) {
+          showError(null);
+        }
+        return;
+      }
+
+      if (!phoneCode && !awaiting2FA) {
+        showError('Please enter the 5-digit verification code sent to Telegram.');
+        if (otpSlots[0]) otpSlots[0].focus();
+        return;
+      }
+
+      const twoFaContainer = document.getElementById('twoFaContainer');
+      const twoFaPassword = document.getElementById('twoFaPassword');
+
+      btnStep2Next.disabled = true;
 
       try {
         if (!awaiting2FA) {
-          const phoneCode = inputPhoneCode.value.trim();
-          if (!phoneCode) {
-            showError('Please enter the code sent to your Telegram app.');
-            btnConfirmCode.disabled = false;
-            return;
-          }
-
-          btnConfirmCode.innerHTML = '<span>Verifying code...</span>';
+          btnStep2Next.innerHTML = '<span>Verifying code...</span>';
           const res = await fetch('/api/setup/verify-code', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -374,25 +506,28 @@
 
           if (data.requires2FA) {
             awaiting2FA = true;
-            twoFaContainer.classList.remove('hidden');
-            twoFaPassword.required = true;
-            twoFaPassword.focus();
+            if (twoFaContainer) twoFaContainer.classList.remove('hidden');
+            if (twoFaPassword) {
+              twoFaPassword.required = true;
+              twoFaPassword.focus();
+            }
             showError('Two-step verification is enabled on your account. Please enter your password.');
-            btnConfirmCode.innerHTML = '<span>Verify Password</span>';
-            btnConfirmCode.disabled = false;
+            btnStep2Next.innerHTML = '<span>Verify Password</span>';
+            btnStep2Next.disabled = false;
             return;
           }
 
-          await loadChannelsAndProceed();
+          newCodeRequested = false;
+          setStep(3);
         } else {
-          const password = twoFaPassword.value;
+          const password = twoFaPassword ? twoFaPassword.value : '';
           if (!password) {
             showError('Please enter your 2FA password.');
-            btnConfirmCode.disabled = false;
+            btnStep2Next.disabled = false;
             return;
           }
 
-          btnConfirmCode.innerHTML = '<span>Verifying password...</span>';
+          btnStep2Next.innerHTML = '<span>Verifying password...</span>';
           const res = await fetch('/api/setup/verify-2fa', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -404,214 +539,408 @@
             throw new Error(data.error || 'Invalid 2FA password.');
           }
 
-          await loadChannelsAndProceed();
+          newCodeRequested = false;
+          setStep(3);
         }
       } catch (err) {
         showError(err.message || 'Verification error.');
       } finally {
-        btnConfirmCode.disabled = false;
+        btnStep2Next.disabled = false;
         if (!awaiting2FA) {
-          btnConfirmCode.innerHTML = '<span>Verify and Continue</span>';
+          btnStep2Next.innerHTML = '<span>Next</span>';
         } else {
-          btnConfirmCode.innerHTML = '<span>Verify Password</span>';
+          btnStep2Next.innerHTML = '<span>Verify Password</span>';
         }
       }
     });
   }
 
-  // ── Load Channels from Telegram ─────────────────────────────────────────
-  async function loadChannelsAndProceed() {
-    setStep(3);
-    const channelSelect = document.getElementById('channelSelect');
-    channelSelect.innerHTML = '<option value="" disabled selected>Loading your channels...</option>';
+  // Step 3: Back and Next
+  if (btnStep3Back) {
+    btnStep3Back.addEventListener('click', () => setStep(2));
+  }
 
-    if (isDemoMode) {
-      const demoChannels = [
-        { id: '-1001928374650', title: 'Lossless Music Vault', username: '@lossless_vault' },
-        { id: '-1009876543210', title: 'Dolby Atmos Masters', username: '@atmos_masters' },
-        { id: '-1005544332211', title: 'Personal Studio Audio FLACs' },
-      ];
+  async function saveStep3Settings(navigateAfter = true) {
+    const channelInput = document.getElementById('channelInput');
+    const enableBotSync = document.getElementById('enableBotSync');
+    const botToken = document.getElementById('botToken');
+    const enableTunnel = document.getElementById('enableTunnel');
+    const urlSecret = document.getElementById('urlSecret');
+    const customPublicUrl = document.getElementById('customPublicUrl');
+    const serverPort = document.getElementById('serverPort');
 
-      channelSelect.innerHTML = '';
-      const defaultOpt = document.createElement('option');
-      defaultOpt.value = '';
-      defaultOpt.textContent = '-- Select your music channel --';
-      defaultOpt.disabled = true;
-      channelSelect.appendChild(defaultOpt);
-
-      for (const ch of demoChannels) {
-        const opt = document.createElement('option');
-        opt.value = ch.id;
-        const tag = ch.username ? ` (${ch.username})` : '';
-        opt.textContent = `${ch.title}${tag}`;
-        channelSelect.appendChild(opt);
-      }
-      channelSelect.selectedIndex = 1;
-
-      const manualOpt = document.createElement('option');
-      manualOpt.value = '__manual__';
-      manualOpt.textContent = 'Custom Channel ID / Username...';
-      channelSelect.appendChild(manualOpt);
-
-      channelSelect.addEventListener('change', () => {
-        const manualRow = document.getElementById('manualChannelRow');
-        if (channelSelect.value === '__manual__') {
-          manualRow.style.display = 'block';
-          document.getElementById('manualChannel').focus();
-        } else {
-          manualRow.style.display = 'none';
-        }
-      });
-      return;
+    let channelVal = channelInput ? channelInput.value.trim() : '';
+    if (!channelVal && serverConfigData?.channel) {
+      channelVal = serverConfigData.channel;
     }
+
+    if (channelVal.startsWith('https://t.me/')) {
+      channelVal = '@' + channelVal.replace('https://t.me/', '').replace('/', '').trim();
+    } else if (channelVal.startsWith('t.me/')) {
+      channelVal = '@' + channelVal.replace('t.me/', '').replace('/', '').trim();
+    }
+
+    if (!channelVal) {
+      showError('Please enter your Telegram music channel ID, URL, or @username.');
+      if (channelInput) channelInput.focus();
+      return false;
+    }
+
+    const isBotSync = enableBotSync ? enableBotSync.checked : false;
+    const botTokenVal = botToken ? botToken.value.trim() : '';
+    if (isBotSync && !botTokenVal) {
+      showError('Please enter your Bot Token or uncheck Bot Automation.');
+      if (botTokenContainer) botTokenContainer.classList.remove('hidden');
+      if (botToken) botToken.focus();
+      return false;
+    }
+
+    if (btnStep3Next && navigateAfter) {
+      btnStep3Next.disabled = true;
+      btnStep3Next.innerHTML = '<span>Checking channel...</span>';
+    }
+
+    // Compute safe port with default 3000 fallback clamped between 1024 and 65535
+    let safePort = 3000;
+    if (serverPort && serverPort.value.trim()) {
+      const parsed = parseInt(serverPort.value.trim(), 10);
+      if (!isNaN(parsed) && parsed >= 1024 && parsed <= 65535) {
+        safePort = parsed;
+      }
+    }
+    if (serverPort) {
+      serverPort.value = safePort;
+    }
+
+    // Validate channel with Telegram MTProto before saving
+    try {
+      const valRes = await fetch('/api/setup/validate-channel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ channel: channelVal }),
+      });
+      const contentType = valRes.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        // If server returned non-JSON (e.g. 404 or restarting), bypass pre-validation check and proceed to /save
+        console.warn('Channel pre-validation endpoint returned non-JSON, deferring to save handler.');
+      } else {
+        const valData = await valRes.json();
+        if (!valRes.ok || !valData.ok) {
+          showError(valData.error || 'Wrong channel ID, URL, or username. Please check that your Telegram account is a member or admin.');
+          if (channelInput) channelInput.focus();
+          return false;
+        }
+        if (valData.channel && valData.channel.id) {
+          channelVal = valData.channel.id;
+        }
+      }
+    } catch (valErr) {
+      console.warn('Channel pre-validation error, attempting save:', valErr);
+    }
+
+    if (btnStep3Next && navigateAfter) {
+      btnStep3Next.innerHTML = '<span>Saving...</span>';
+    }
+
+    const teledriveEl = document.getElementById('teledriveChannel');
+    const teledriveVal = teledriveEl ? teledriveEl.value.trim() : (serverConfigData?.teledriveChannel || '');
 
     try {
-      const res = await fetch('/api/setup/channels');
-      const data = await res.json();
-
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || 'Failed to load channels.');
-      }
-
-      channelSelect.innerHTML = '';
-      if (!data.channels || data.channels.length === 0) {
-        channelSelect.innerHTML = '<option value="" disabled selected>No channels found. Enter manually below.</option>';
-        document.getElementById('manualChannelRow').style.display = 'block';
-        return;
-      }
-
-      const defaultOpt = document.createElement('option');
-      defaultOpt.value = '';
-      defaultOpt.textContent = '-- Select your music channel --';
-      defaultOpt.disabled = true;
-      defaultOpt.selected = true;
-      channelSelect.appendChild(defaultOpt);
-
-      for (const ch of data.channels) {
-        const opt = document.createElement('option');
-        opt.value = ch.id;
-        const tag = ch.username ? ` (${ch.username})` : '';
-        opt.textContent = `${ch.title}${tag}`;
-        channelSelect.appendChild(opt);
-      }
-
-      const manualOpt = document.createElement('option');
-      manualOpt.value = '__manual__';
-      manualOpt.textContent = 'Custom Channel ID / Username...';
-      channelSelect.appendChild(manualOpt);
-
-      channelSelect.addEventListener('change', () => {
-        const manualRow = document.getElementById('manualChannelRow');
-        if (channelSelect.value === '__manual__') {
-          manualRow.style.display = 'block';
-          document.getElementById('manualChannel').focus();
-        } else {
-          manualRow.style.display = 'none';
-        }
+      const res = await fetch('/api/setup/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel: channelVal,
+          teledriveChannel: teledriveVal,
+          enableBotSync: enableBotSync ? enableBotSync.checked : false,
+          botToken: botToken ? botToken.value.trim() : '',
+          enableTunnel: enableTunnel ? enableTunnel.checked : false,
+          urlSecret: urlSecret ? urlSecret.value.trim() : '',
+          customPublicUrl: customPublicUrl ? customPublicUrl.value.trim() : '',
+          port: safePort.toString(),
+        }),
       });
+
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || 'Failed to save configuration.');
+      }
+
+      serverConfigData = {
+        ...serverConfigData,
+        configured: true,
+        channel: channelVal,
+        teledriveChannel: teledriveVal,
+        enableBotSync: enableBotSync ? enableBotSync.checked : false,
+        botToken: botToken ? botToken.value.trim() : '',
+        enableTunnel: enableTunnel ? enableTunnel.checked : false,
+        urlSecret: urlSecret ? urlSecret.value.trim() : '',
+        customPublicUrl: customPublicUrl ? customPublicUrl.value.trim() : '',
+        port: safePort,
+      };
+
+      if (navigateAfter) {
+        setConfigurationLock(true);
+        displayFinalStep(data.manifestUrl, data.tracksCount);
+      }
+      return true;
     } catch (err) {
-      showError('Could not auto-load channels: ' + err.message + '. You can enter your channel manually.');
-      document.getElementById('manualChannelRow').style.display = 'block';
+      showError(err.message || 'Error saving setup.');
+      return false;
+    } finally {
+      if (btnStep3Next && navigateAfter) {
+        btnStep3Next.disabled = false;
+        btnStep3Next.innerHTML = '<span>Next</span>';
+      }
     }
   }
 
-  // ── Step 3: Save Configuration ──────────────────────────────────────────
-  const formLibrary = document.getElementById('formLibrary');
-  const btnSaveConfig = document.getElementById('btnSaveConfig');
-  const btnBackToStep2 = document.getElementById('btnBackToStep2');
-
-  if (btnBackToStep2) {
-    btnBackToStep2.addEventListener('click', () => setStep(2));
+  function collapseAdvancedSection() {
+    const advancedContent = document.getElementById('advancedContent');
+    const toggleAdvanced = document.getElementById('toggleAdvanced');
+    if (advancedContent) advancedContent.classList.add('hidden');
+    if (toggleAdvanced) {
+      const arrow = toggleAdvanced.querySelector('.toggle-arrow');
+      if (arrow) arrow.textContent = '▼';
+    }
   }
 
-  if (formLibrary) {
-    if (isDemoMode) formLibrary.noValidate = true;
-    formLibrary.addEventListener('submit', async (e) => {
-      e.preventDefault();
+  if (btnStep3Next) {
+    btnStep3Next.addEventListener('click', async () => {
+      clearError();
+      collapseAdvancedSection();
+
+      // If locked: navigate straight to Step 4 without re-saving
+      if (isConfiguredLocked) {
+        ensureStep4Rendered();
+        setStep(4);
+        return;
+      }
+
+      await saveStep3Settings(true);
+    });
+  }
+
+  // Step 4: Restart Server and Reconfigure
+  const btnRestartServer = document.getElementById('btnRestartServer');
+  if (btnRestartServer) {
+    btnRestartServer.addEventListener('click', async () => {
+      btnRestartServer.disabled = true;
+      const originalHtml = btnRestartServer.innerHTML;
+      btnRestartServer.innerHTML = '<span>Restarting...</span>';
       clearError();
 
-      const channelSelect = document.getElementById('channelSelect');
-      let chosenChannel = channelSelect.value;
-      if (chosenChannel === '__manual__' || !chosenChannel) {
-        chosenChannel = document.getElementById('manualChannel').value.trim();
-      }
-
-      if (!chosenChannel) {
-        showError('Please select or specify your Telegram music channel.');
-        return;
-      }
-
-      const enableBotSync = document.getElementById('enableBotSync').checked;
-      const enableTunnel = document.getElementById('enableTunnel')?.checked ?? true;
-      const customPublicUrl = document.getElementById('customPublicUrl')?.value.trim() || '';
-      const urlSecret = document.getElementById('urlSecret').value.trim();
-      const port = document.getElementById('serverPort').value.trim() || '3000';
-
-      if (isDemoMode) {
-        btnSaveConfig.disabled = true;
-        btnSaveConfig.innerHTML = enableTunnel
-          ? '<span>Simulating Cloudflare HTTPS tunnel...</span>'
-          : '<span>Saving configuration...</span>';
-
-        setTimeout(() => {
-          btnSaveConfig.disabled = false;
-          btnSaveConfig.innerHTML = '<span>Complete Setup</span>';
-          const secretPath = urlSecret ? `/${urlSecret}` : '';
-          const demoOrigin = enableTunnel
-            ? 'https://telemusic-demo.trycloudflare.com'
-            : (customPublicUrl || `http://localhost:${port}`);
-          const demoManifestUrl = `${demoOrigin}${secretPath}/manifest.json`;
-          displayFinalStep(demoManifestUrl);
-        }, 500);
-        return;
-      }
-
-      btnSaveConfig.disabled = true;
-      btnSaveConfig.innerHTML = enableTunnel
-        ? '<span>Connecting Cloudflare HTTPS tunnel...</span>'
-        : '<span>Saving configuration...</span>';
-
       try {
-        const res = await fetch('/api/setup/save', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            channel: chosenChannel,
-            enableBotSync,
-            enableTunnel,
-            customPublicUrl,
-            urlSecret,
-            port,
-          }),
-        });
-
+        const res = await fetch('/api/setup/restart', { method: 'POST' });
         const data = await res.json();
         if (!res.ok || !data.ok) {
-          throw new Error(data.error || 'Failed to save configuration.');
+          throw new Error(data.error || 'Restart failed');
         }
 
-        displayFinalStep(data.manifestUrl);
+        btnRestartServer.innerHTML = '<span>✓ Restarted</span>';
+        if (data && typeof data.tracksCount === 'number') {
+          updateStep4TrackCount(data.tracksCount);
+        }
+        setTimeout(() => {
+          btnRestartServer.disabled = false;
+          btnRestartServer.innerHTML = originalHtml;
+        }, 2000);
       } catch (err) {
-        showError(err.message || 'Error saving setup.');
-      } finally {
-        btnSaveConfig.disabled = false;
-        btnSaveConfig.innerHTML = '<span>Complete Setup</span>';
+        showError('Restart error: ' + err.message);
+        btnRestartServer.disabled = false;
+        btnRestartServer.innerHTML = originalHtml;
       }
     });
+  }
+
+  if (btnReconfigure) {
+    btnReconfigure.addEventListener('click', () => {
+      setConfigurationLock(false);
+      setStep(1);
+    });
+  }
+
+  // ── Credential Masking (Dots Unfocused, Plaintext When Focused) ─────────
+  const maskedInputs = document.querySelectorAll('.masked-credential');
+  maskedInputs.forEach((input) => {
+    input.addEventListener('focus', () => {
+      if (input.dataset.locked !== 'true') {
+        input.type = 'text';
+      }
+    });
+
+    input.addEventListener('blur', () => {
+      input.type = 'password';
+    });
+
+    input.addEventListener('input', () => {
+      if (input.id) {
+        sessionStorage.setItem('setup_' + input.id, input.value);
+        if (input.id === 'phoneNumber') {
+          clearError();
+        }
+        if (input.id === 'twoFaPassword') {
+          updateStep2NextState();
+        }
+      }
+    });
+  });
+
+  // Safe port input handling: fallback to 3000 if emptied or invalid
+  const serverPortEl = document.getElementById('serverPort');
+  if (serverPortEl) {
+    serverPortEl.addEventListener('blur', () => {
+      const val = serverPortEl.value.trim();
+      const parsed = parseInt(val, 10);
+      if (!val || isNaN(parsed) || parsed < 1024 || parsed > 65535) {
+        serverPortEl.value = '3000';
+      }
+    });
+  }
+
+  ['channelInput', 'customPublicUrl', 'serverPort'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.addEventListener('input', () => sessionStorage.setItem('setup_' + id, el.value));
+      el.addEventListener('change', () => sessionStorage.setItem('setup_' + id, el.value));
+    }
+  });
+
+  // ── Advanced Options Toggle ─────────────────────────────────────────────
+  const toggleAdvanced = document.getElementById('toggleAdvanced');
+  const advancedContent = document.getElementById('advancedContent');
+  if (toggleAdvanced && advancedContent) {
+    toggleAdvanced.addEventListener('click', () => {
+      if (isConfiguredLocked) return;
+      advancedContent.classList.toggle('hidden');
+      const arrow = toggleAdvanced.querySelector('.toggle-arrow');
+      if (arrow) arrow.textContent = advancedContent.classList.contains('hidden') ? '\u25BC' : '\u25B2';
+    });
+  }
+
+  // ── Bot Automation & Tunnel Toggles ────────────────────────────────────
+  const enableBotSync = document.getElementById('enableBotSync');
+  const botTokenContainer = document.getElementById('botTokenContainer');
+  if (enableBotSync) {
+    enableBotSync.addEventListener('change', () => {
+      if (botTokenContainer) botTokenContainer.classList.toggle('hidden', !enableBotSync.checked);
+      sessionStorage.setItem('setup_enableBotSync', enableBotSync.checked ? 'true' : 'false');
+    });
+  }
+
+  const enableTunnel = document.getElementById('enableTunnel');
+  if (enableTunnel) {
+    enableTunnel.addEventListener('change', () => {
+      sessionStorage.setItem('setup_enableTunnel', enableTunnel.checked ? 'true' : 'false');
+    });
+  }
+
+  // ── Step 3: Initialize Channel Input ─────────────────────────────────────
+  function initChannelInput() {
+    const channelInput = document.getElementById('channelInput');
+    if (!channelInput) return;
+
+    const savedChannel = sessionStorage.getItem('setup_channelInput') || serverConfigData?.channel;
+    if (savedChannel && !channelInput.value) {
+      channelInput.value = savedChannel;
+    }
+
+    channelInput.addEventListener('input', () => {
+      sessionStorage.setItem('setup_channelInput', channelInput.value.trim());
+      clearError();
+    });
+
+    if (isConfiguredLocked) {
+      channelInput.disabled = true;
+    }
+  }
+
+  function updateStep4TrackCount(count) {
+    const el = document.getElementById('step4TrackStatus');
+    if (!el) return;
+    if (typeof count === 'number' && count >= 0) {
+      el.textContent = `Online • ${count.toLocaleString()} Tracks Indexed`;
+    } else if (count) {
+      el.textContent = `Online • ${count} Tracks Indexed`;
+    } else {
+      el.textContent = 'Online • Ready to Stream';
+    }
   }
 
   // ── Step 4: Display Finished Addon Links & QR ───────────────────────────
-  function displayFinalStep(manifestUrl) {
-    latestStep = 4;
-    maxStepReached = 4;
-    setStep(4);
-
+  function ensureStep4Rendered() {
     const inputManifest = document.getElementById('manifestUrl');
-    if (inputManifest) inputManifest.value = manifestUrl || '';
+    let manifestUrl = inputManifest ? inputManifest.value.trim() : '';
+
+    if (!manifestUrl) {
+      let baseOrigin = '';
+      if (serverConfigData?.customPublicUrl) {
+        baseOrigin = serverConfigData.customPublicUrl;
+      } else if (serverConfigData?.enableTunnel && serverConfigData?.tunnelActive && serverConfigData?.tunnelUrl) {
+        baseOrigin = serverConfigData.tunnelUrl;
+      } else {
+        const proto = window.location.protocol;
+        const host = window.location.host;
+        baseOrigin = `${proto}//${host}`;
+      }
+      const secretPath = serverConfigData?.urlSecret ? `/${serverConfigData.urlSecret}` : '';
+      manifestUrl = `${baseOrigin}${secretPath}/manifest.json`;
+      if (inputManifest) inputManifest.value = manifestUrl;
+    }
+
+    const inputWebdav = document.getElementById('webdavUrl');
+    if (inputWebdav && manifestUrl) {
+      inputWebdav.value = manifestUrl.replace(/\/manifest\.json$/, '/dav');
+    }
+
+    const qrContainer = document.getElementById('qrCodeContainer');
+    if (qrContainer && manifestUrl && (!qrContainer.querySelector('svg') || qrContainer.dataset.renderedUrl !== manifestUrl)) {
+      qrContainer.dataset.renderedUrl = manifestUrl;
+      renderSvgQrCode(qrContainer, manifestUrl);
+    }
+
+    if (serverConfigData && typeof serverConfigData.tracksCount === 'number') {
+      updateStep4TrackCount(serverConfigData.tracksCount);
+    }
+  }
+
+  function displayFinalStep(manifestUrl, tracksCount) {
+    const inputManifest = document.getElementById('manifestUrl');
+    if (inputManifest && manifestUrl) {
+      inputManifest.value = manifestUrl;
+    }
+
+    const inputWebdav = document.getElementById('webdavUrl');
+    if (inputWebdav && manifestUrl) {
+      inputWebdav.value = manifestUrl.replace(/\/manifest\.json$/, '/dav');
+    }
+
+    setStep(4);
 
     const qrContainer = document.getElementById('qrCodeContainer');
     if (qrContainer && manifestUrl) {
+      qrContainer.dataset.renderedUrl = manifestUrl;
       renderSvgQrCode(qrContainer, manifestUrl);
+    }
+
+    if (typeof tracksCount === 'number') {
+      updateStep4TrackCount(tracksCount);
+    } else if (serverConfigData && typeof serverConfigData.tracksCount === 'number') {
+      updateStep4TrackCount(serverConfigData.tracksCount);
+    }
+
+    if (manifestUrl) {
+      fetch(manifestUrl, { cache: 'no-store' })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((m) => {
+          if (m && m.version) {
+            const match = m.version.match(/•\s*(\d[\d,]*)\s*songs?/i);
+            if (match) {
+              updateStep4TrackCount(parseInt(match[1].replace(/,/g, ''), 10));
+            }
+          }
+        })
+        .catch(() => {});
     }
   }
 
@@ -624,11 +953,14 @@
     btn.addEventListener('click', async () => {
       try {
         await navigator.clipboard.writeText(input.value);
-        const originalText = btn.textContent;
-        btn.textContent = 'Copied!';
+        const textSpan = btn.querySelector('span');
+        const origText = textSpan ? textSpan.textContent : btn.textContent;
+        if (textSpan) textSpan.textContent = 'Copied!';
+        else btn.textContent = 'Copied!';
         btn.classList.add('copied');
         setTimeout(() => {
-          btn.textContent = originalText;
+          if (textSpan) textSpan.textContent = origText;
+          else btn.textContent = origText;
           btn.classList.remove('copied');
         }, 2000);
       } catch (_) {
@@ -639,51 +971,126 @@
   }
 
   setupCopyButton('btnCopyManifest', 'manifestUrl');
+  setupCopyButton('btnCopyWebdav', 'webdavUrl');
 
-  const btnReconfigure = document.getElementById('btnReconfigure');
-  if (btnReconfigure) {
-    btnReconfigure.addEventListener('click', () => setStep(1));
-  }
-
-  // ── High-Precision SVG QR Code Renderer with Centered Addon Logo ─────────
+  // ── SVG QR Code Renderer (Clean Standard QR, Cache-Busted) ──────────────
   async function renderSvgQrCode(container, text) {
-    container.innerHTML = '<span style="font-size:0.8125rem;color:var(--text-muted)">Generating QR...</span>';
+    if (!container || !text) return;
+    container.innerHTML = '<span style="font-size:0.8125rem;color:#0b1329;font-weight:600">Generating QR...</span>';
     try {
-      const res = await fetch(`/api/setup/qr?url=${encodeURIComponent(text)}`);
+      const res = await fetch(`/api/setup/qr?url=${encodeURIComponent(text)}&t=${Date.now()}`);
       if (!res.ok) throw new Error('Failed to load QR');
       const svgText = await res.text();
       container.innerHTML = svgText;
     } catch (_) {
-      container.innerHTML = '<span style="font-size:0.8125rem;color:var(--text-dim)">QR unavailable</span>';
+      container.innerHTML = '<span style="font-size:0.8125rem;color:#e11d48;font-weight:600">QR unavailable</span>';
     }
   }
 
-  // ── Initial Status Check ────────────────────────────────────────────────
+  // ── Restore Fields & Initial Status Check ────────────────────────────────
+  function restoreSessionStorageFields() {
+    const fieldIds = [
+      'apiId',
+      'apiHash',
+      'phoneNumber',
+      'channelInput',
+      'botToken',
+      'urlSecret',
+      'customPublicUrl',
+      'serverPort',
+    ];
+    fieldIds.forEach((id) => {
+      const val = sessionStorage.getItem('setup_' + id);
+      const el = document.getElementById(id);
+      if (el && val) {
+        if (id === 'phoneNumber') {
+          setPhoneInputFromFull(val);
+        } else {
+          el.value = val;
+        }
+      }
+    });
+  }
+
   async function checkInitialStatus() {
-    if (isDemoMode) {
-      // In demo mode, start at Step 1 and allow free navigation across all steps
-      maxStepReached = 4;
-      latestStep = 1;
-      setStep(1);
-      return;
-    }
+    restoreSessionStorageFields();
 
     try {
       const res = await fetch('/api/setup/status');
       if (!res.ok) return;
       const data = await res.json();
+      serverConfigData = data;
+
+      const populate = (id, val) => {
+        const el = document.getElementById(id);
+        if (el && val && !el.value) {
+          el.value = val;
+        }
+      };
+
+      populate('apiId', data.apiId);
+      populate('apiHash', data.apiHash);
+      if (data.phoneNumber) {
+        setPhoneInputFromFull(data.phoneNumber);
+      }
+      populate('channelInput', data.channel);
+      populate('botToken', data.botToken);
+      populate('urlSecret', data.urlSecret);
+      populate('customPublicUrl', data.customPublicUrl);
+      if (data.port) populate('serverPort', String(data.port));
+
+      // Reflect saved TeleDrive Channel
+      if (data.teledriveChannel) {
+        const tdEl = document.getElementById('teledriveChannel');
+        if (tdEl) tdEl.value = data.teledriveChannel;
+      }
+
+      // Reflect saved Bot Automation state & Token box visibility
+      const syncCheck = document.getElementById('enableBotSync');
+      if (syncCheck) {
+        syncCheck.checked = Boolean(data.enableBotSync);
+        if (botTokenContainer) {
+          botTokenContainer.classList.toggle('hidden', !data.enableBotSync);
+        }
+      }
+
+      // Reflect saved Cloudflare Tunnel state
+      const tunnelCheck = document.getElementById('enableTunnel');
+      if (tunnelCheck && data.enableTunnel !== undefined) {
+        tunnelCheck.checked = Boolean(data.enableTunnel);
+      }
+
+      // Keep advanced section collapsed by default
+      collapseAdvancedSection();
 
       if (data.configured) {
+        setConfigurationLock(true);
+
         let baseOrigin = '';
-        if (data.tunnelActive && data.tunnelUrl) {
+        if (data.customPublicUrl) {
+          baseOrigin = data.customPublicUrl;
+        } else if (data.enableTunnel && data.tunnelActive && data.tunnelUrl) {
           baseOrigin = data.tunnelUrl;
         } else {
           const proto = window.location.protocol;
           const host = window.location.host;
           baseOrigin = `${proto}//${host}`;
         }
-        const manifestUrl = `${baseOrigin}/manifest.json`;
-        displayFinalStep(manifestUrl);
+        const secretPath = data.urlSecret ? `/${data.urlSecret}` : '';
+        const manifestUrl = `${baseOrigin}${secretPath}/manifest.json`;
+        displayFinalStep(manifestUrl, data.tracksCount);
+      } else {
+        const fieldIds = ['apiId', 'apiHash', 'phoneNumber', 'channelInput', 'teledriveChannel', 'botToken', 'urlSecret', 'customPublicUrl', 'serverPort'];
+        fieldIds.forEach((id) => sessionStorage.removeItem('setup_' + id));
+        document.querySelectorAll('input:not([type="checkbox"]):not([type="hidden"])').forEach((input) => {
+          if (input.id === 'serverPort') {
+            input.value = '3000';
+          } else {
+            input.value = '';
+          }
+        });
+        setStep(1);
+        setConfigurationLock(false);
       }
     } catch (_) {}
   }

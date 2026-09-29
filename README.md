@@ -1,209 +1,305 @@
 # Telegram Music Addon
 
-Self-hosted [BitChord](https://github.com/kushagrasinghx/BitChord) addon that streams your personal FLAC, Dolby Atmos, and hi-res audio library from a private Telegram channel using GramJS and Express.
+Self-hosted [BitChord](https://github.com/kushagrasinghx/BitChord) addon that streams your personal FLAC, Dolby Atmos, and hi-res audio library from a private Telegram channel, using GramJS and Express.
 
 ---
 
 ## Contents
 
-- **Overview:** [About](#about) · [Features](#features) · [How it works](#how-it-works)
-- **Channel tools:** [Music search (/s)](#song-search-and-downloads) · [Keeping duplicate tracks](#keeping-duplicate-songs) · [Chat cleaner](#user-chatter-auto-cleaner)
-- **Quick start:** [Prerequisites](#1-prerequisites) · [Authentication](#2-setup-and-authentication) · [Local run](#3-start-the-server) · [Cloud deploy](#4-deploy-to-the-cloud)
-- **Configuration:** [Environment variables](#4-deploy-to-the-cloud) · [URL_SECRET protection](#protecting-your-public-deployment-with-url_secret-optional) · [24/7 uptime](#5-keeping-it-running-247-preventing-cold-starts) · [Add to BitChord](#6-add-to-bitchord)
-- **Reference:** [API Endpoints](#api-endpoints)
+- [About](#about)
+- [Features](#features)
+- [Performance benchmark](#performance-benchmark)
+- [Quick start](#quick-start)
+- [Networking and remote access (local hosting only)](#networking-and-remote-access-local-hosting-only)
+- [WebDAV streaming](#webdav-streaming)
+- [Channel commands and music search](#channel-commands-and-music-search)
+- [How it works](#how-it-works)
+- [API Endpoints](#api-endpoints)
 
 ---
 
 ## About
 
-Telegram Music Addon lets you run a personal streaming backend without dedicated storage servers. It indexes audio files saved in your own private Telegram channel and streams them directly to BitChord on Android.
+Telegram Music Addon lets you run a personal streaming backend without a dedicated storage server. It indexes audio files in your own private Telegram channel and streams them directly to BitChord on Android.
 
-ExoPlayer connects to the server with standard HTTP 206 range requests, reading 64KB to 512KB chunks on demand. Since files remain in your private channel, you do not hit third-party cloud storage fees, bandwidth quotas, or transcoding bottlenecks.
-
-## Features
-
-- **Personal channel storage:** Store your music library in your own private channel with no fixed bandwidth quotas.
-- **Direct FLAC and Dolby Atmos streaming:** Range requests pull raw slices on demand for instant seeking without server-side re-encoding.
-- **Queue-aware preamble cache:** Stores the initial 512KB of active and queued tracks in memory, letting playback start in under 10ms from RAM.
-- **Spatial audio detection:** Recognizes E-AC-3 JOC streams in M4A audio containers (and raw `.ec3` files) and responds to `?atmos=auto` requests.
-- **Channel `/s` search:** Run `/s <query>` to search Deezer through `@MusicsHuntersbot`, page through results, and download tracks with one tap.
-- **In-memory search index:** Retains track metadata in RAM for rapid search resolution.
-- **Flexible title and artist matching:** Cleans up soundtrack tags, parentheticals, and multi-artist credits to match BitChord queries accurately.
-- **ISRC matching:** Direct lookup endpoints support exact recording code queries.
-- **Audio deduplication:** Automatically keeps higher-bitrate or higher-sample-rate copies when duplicate files appear, while keeping separate Dolby Atmos mixes.
-- **Chat cleaner:** Removes regular text messages and media chatter while preserving audio uploads, bot menus, and admin announcements.
+ExoPlayer connects with standard HTTP 206 range requests, reading 64 KB to 512 KB chunks on demand. Files stay in your private channel, so you avoid third-party storage fees, bandwidth quotas, and transcoding bottlenecks.
 
 > [!NOTE]
 > Keep your Telegram channel **Private**. Public channels get crawled by search engines and copyright bots.
 
-## Channel commands and music search
+---
 
-### Song search and downloads
+## Features
 
-Send `/s`, `/song`, `#s`, or `#song` in your channel to find and download lossless FLAC files:
+- Personal channel storage with no fixed bandwidth quotas
+- Direct FLAC and Dolby Atmos streaming via HTTP 206 range requests, no server-side re-encoding
+- Under 10 ms track matching in local benchmarks (in-memory index lookup, not end-to-end playback time)
+- Audio streamed directly from Telegram through the addon, no separate storage server needed. Bandwidth and performance are subject to Telegram, your hosting provider, network conditions, and applicable API limits.
+- Built-in WebDAV server for BitChord, Symfonium, VLC, and operating system network mounts
+- Spatial audio detection for E-AC-3 JOC streams in M4A containers and raw `.ec3` files
+- Interactive 4-step web setup wizard at `/setup`, with auto-detected channel dropdown and mobile QR code pairing
+- Mobile install page at `/install` that copies the addon URL to your clipboard automatically when opened (including when your phone scans the Step 4 QR code)
+- In-channel `/s` and `/song` commands for Deezer search with inline download buttons (requires bot token, see below)
+- ISRC lookup endpoints for exact recording code matching
+- Audio deduplication: keeps the higher-quality copy when duplicates appear, with a 6-hour grace window before cleanup
+- Chat cleaner that removes text chatter and media spam while preserving audio files, bot menus, and admin messages
 
-- **Interactive search:** Send `/s <song name>` (for example `/s brown rang`) to fetch Deezer results:
-  ```text
-  🎧 Search Results for: "brown rang" [Deezer FLAC]
+---
 
-  1. Boogaloo Joe Jones - Brown Bag (5:07)
-  2. Nizi19 - Browning (1:45)
-  3. Van Morrison - Brown-Eyed Girl (3:03)
-  4. The King's Noyse - Browning (4:45)
-  5. Jean-Claude Vannier - Browning (3:14)
-  ```
-  - **Inline buttons:** If you supply a bot token, the addon attaches square buttons `[ 1 ]` to `[ 7 ]` and page controls `[ ⬅️ ] [ ❌ ] [ ➡️ ]`. Check [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md#31-optional-add-a-bot-for-inline-buttons) for details.
-  - **Pagination:** Tapping `➡️` or `⬅️` flips pages in place without sending new messages.
-  - **Download:** Tap a number button or type `/1` through `/14` to pull the file into your channel.
-- **Direct links:** Paste Spotify, Deezer, Tidal, or Qobuz track links directly with `/s <url>`.
+## Performance benchmark
 
-### Keeping duplicate songs
+```text
+Benchmark: local addon track matching / resolution
+Result:    < 10 ms
+Method:    terminal / API request timing
+Note:      measures only addon-internal lookup, not end-to-end playback time
+           (excludes provider switching, network latency, buffering, ExoPlayer startup)
 
-If you want to keep two different versions of a song (such as a 16-bit FLAC alongside a 24-bit master or an acoustic version):
-- **File caption:** Include `/keep`, `#keep`, or `/ig` in the caption when uploading.
-- **Grace window:** When a new file matches an existing track, the server pauses for 30 seconds before cleaning the duplicate. Reply to that file with `/keep` to save both copies.
-- **Bot notifications:** When `TELEGRAM_BOT_TOKEN` is set, duplicate warnings and cleanup digests are posted by your bot so your personal account stays silent.
+BitChord search request
+  ↓
+Addon song matching: < 10 ms in local benchmark
+  ↓
+HTTP response / connection
+  ↓
+BitChord source switching
+  ↓
+Previous provider stops
+  ↓
+ExoPlayer prepares stream
+  ↓
+Internet / network latency
+  ↓
+🎵 Playback starts
+```
 
-### User chatter auto-cleaner
+The `< 10 ms` figure is the addon's own request and lookup time. Actual playback start time depends on BitChord's provider switching, network conditions, and player buffering.
 
-The channel listener discards text, images, stickers, and spam from regular chat members to prevent channel clutter.
-- **Immunity:** Audio files, bot button menus, admin announcements, system alerts, and slash commands are preserved.
-
-## How it works
-
-1. You upload audio tracks (FLAC, ALAC, WAV, MP3, M4A, or Dolby Atmos M4A/EAC3) to your private channel.
-2. The server signs into Telegram through MTProto (GramJS) with your user session, avoiding bot API upload restrictions.
-3. The server scans file headers, extracts audio metadata, and populates the in-memory search index.
-4. BitChord calls `/manifest.json`, `/search?q=...`, and `/stream/:id`.
-5. ExoPlayer streams audio chunks straight from `/audio/:id`.
-
-### Playback resolution flow
-
-1. **Immediate start:** BitChord starts playing from YouTube Music right away to prevent buffering pauses.
-2. **Parallel query:** Simultaneously, BitChord queries your Telegram addon and JioSaavn.
-3. **Upgrade priority:**
-   - If present in your Telegram vault, BitChord switches immediately to your **Telegram FLAC / Dolby stream**.
-   - If absent from Telegram, it upgrades to **JioSaavn (320 kbps)**.
-   - If unavailable on both, playback continues on **YouTube Music (160 kbps)**.
-
-> [!NOTE]
-> If your cloud container was idling on a cold start, keep it active with an automated ping check (Step 5 below) so Telegram FLAC always answers immediately.
+---
 
 ## Quick start
 
-### 1. Prerequisites
+### 1-Click Installer (Windows)
 
-- Node.js 18+
-- Telegram account with `API_ID` and `API_HASH` from [my.telegram.org](https://my.telegram.org)
-- A private Telegram channel dedicated to your music
+For Windows users who want a single file without running any commands:
 
-### 2. Setup and authentication
+1. Download **`Install-Telegram-Music.bat`** from the latest GitHub Release.
+2. Double-click it.
+3. The installer automatically:
+   - Detects Node.js, installs it silently via Windows Package Manager or PowerShell if missing.
+   - Downloads the latest addon package from GitHub.
+   - Installs all dependencies.
+   - Starts the server and opens `http://localhost:3000/setup` in your browser.
 
-Clone the repository and install dependencies:
+---
 
-```bash
-git clone https://github.com/Imnotshashwat/Telegram-Music-Addon.git
-cd Telegram-Music-Addon
-npm install
-```
+### Option A: Easy web setup (for git clones and ZIP downloads)
 
-Generate your session string:
+For users who already cloned the repo or extracted the ZIP:
 
-```bash
-npm run login
-```
+1. **Start the setup wizard:**
+   - **Windows:** Double-click `setup.bat` (runs `npm install` automatically if needed)
+   - **Mac / Linux:** Run `npm start`
+2. Your browser opens to `http://localhost:3000/setup` automatically. On first run with no configuration, the server opens it on its own. On Mac/Linux, if it does not open, navigate there manually.
+3. Follow the 4 steps:
+   - **Step 1 (Credentials):** Enter your Telegram `API_ID`, `API_HASH`, and phone number (from [my.telegram.org](https://my.telegram.org)).
+   - **Step 2 (Verification):** Enter the login code sent to your Telegram app (and your 2FA password if enabled).
+   - **Step 3 (Library):** Select your private music channel from the auto-detected dropdown.
+   - **Step 4 (Connect):** Scan the QR code with your phone to open the mobile install page, or tap **Copy Addon URL** to paste into BitChord.
 
-Follow the prompts for your API ID, API hash, phone number, login code, and channel handle or ID.
+---
 
-> [!TIP]
-> For architecture notes, numeric channel ID lookups, or container setups, see [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md).
+### Option B: Manual setup (Linux VPS or headless)
 
-### 3. Start the server
+For remote servers, Docker, or terminal-only setups:
 
-```bash
-npm start
-```
+1. **Clone and install:**
+   ```bash
+   git clone https://github.com/Imnotshashwat/Telegram-Music-Addon.git
+   cd Telegram-Music-Addon
+   npm install
+   ```
+2. **Generate your session string:**
+   ```bash
+   npm run login
+   ```
+   Follow the prompts: API ID, API hash, phone number, login code, channel handle or ID.
+3. **Configure `.env`:**
+   Copy `env.example` to `.env` and fill in the 4 required Telegram parameters:
+   ```env
+   TELEGRAM_API_ID=1234567
+   TELEGRAM_API_HASH=abcdef0123456789
+   TELEGRAM_SESSION_STRING=1ApW...
+   TELEGRAM_CHANNEL=-1001234567890
+   ```
+   Everything else in `env.example` is optional. `PORT` defaults to `3000`. Parameters left blank are unused. See `env.example` for the full list with comments.
+4. **Start the server:**
+   ```bash
+   npm start
+   ```
 
-The server listens on port `3000` by default. Check the manifest in your browser:
+---
 
-```text
-http://localhost:3000/manifest.json
-```
+## Networking and remote access (local hosting only)
 
-#### Local PC to phone setup (Cloudflare Tunnel)
-Android prevents cleartext `http://` streams across local network addresses. If you run the addon on your desktop and want to stream to your phone, expose an HTTPS link using Cloudflare:
+> [!NOTE]
+> This section is **only for local hosting** (running on your own PC or home server).
+>
+> If you deploy to a cloud provider (Render, Fly.io, Railway, etc.), you do not need any of this. Those platforms automatically assign a public HTTPS domain. Just copy your service URL into BitChord and skip this section entirely.
 
-```bash
-cloudflared tunnel --url http://localhost:3000
-```
+Android ExoPlayer blocks unencrypted `http://` streams. To stream from a local machine to your phone over mobile data or outside your home Wi-Fi, you need a public HTTPS address.
 
-Use the output `https://<subdomain>.trycloudflare.com` URL inside BitChord.
+### 1. Automated Cloudflare Quick Tunnel
 
-### 4. Deploy to the cloud
+The setup wizard includes this out of the box:
 
-Because Android ExoPlayer expects HTTPS endpoints, host the addon on a provider with SSL support (Render, Fly.io, or through Cloudflare).
+- Leave **Enable Cloudflare HTTPS Tunnel** checked in Step 3.
+- The server provisions an `https://*.trycloudflare.com` address automatically on startup.
+- Your phone can scan the Step 4 QR code and stream anywhere over 4G/5G or remote Wi-Fi.
+- On Windows, you can also launch tunnel mode anytime with `start-https.bat`.
 
-Set these environment variables in your hosting settings:
+### 2. Permanent HTTPS with Tailscale Funnel
 
-| Variable | Description |
-|---|---|
-| `TELEGRAM_API_ID` | Numeric Telegram API ID |
-| `TELEGRAM_API_HASH` | Telegram API hash string |
-| `TELEGRAM_SESSION_STRING` | User session string generated by `npm run login` |
-| `TELEGRAM_CHANNEL` | Channel handle (e.g. `@my_vault`) or numeric ID (e.g. `-1001234567890`) |
-| `PORT` | HTTP port (default `3000` or host provided) |
-| `ENABLE_CHANNEL_NOTIFICATIONS` | Set to `true` to post deduplication digests to your channel (default: `false`) |
-| `TELEGRAM_BOT_TOKEN` | Optional bot token to display inline buttons under `/s` results and route automated channel notifications/deletions through your bot |
-| `TELEDRIVE_CHANNEL` | Optional source channel handle or ID to auto-sync audio files uploaded via TeleDrive |
-| `URL_SECRET` | Optional token path prefix to restrict public access to your own devices |
+For a fixed address that survives PC restarts:
 
-#### Protecting your public deployment with URL_SECRET (optional)
+1. Install [Tailscale](https://tailscale.com) on your PC and phone.
+2. In your [Tailscale Admin Console](https://login.tailscale.com/admin/dns), enable HTTPS Certificates under **DNS** > **HTTPS Certificates**.
+3. Run Funnel in the background:
+   ```bash
+   tailscale funnel --bg 3000
+   ```
+4. In Step 3 (Advanced Options), enter your Tailscale address under **Custom Public Domain or Host**:
+   ```text
+   https://your-pc-name.your-tailnet.ts.net
+   ```
 
-When hosting Telegram Music Addon on a public URL, automated bots or strangers could find your domain and stream files through your Telegram account. Setting a secret path token locks the server so only your devices can access it.
+---
 
-1. **Set the secret:**
-   - In `.env`: add `URL_SECRET=mysecret123`
-   - In cloud dashboards: add `URL_SECRET` to your environment variables
-2. **Connect inside BitChord:**
-   Append the token to your manifest address:
+### Protecting your deployment with URL_SECRET (optional)
+
+Restricts your public addon URL with a secret path token so only your own devices can connect:
+
+1. Enter your secret in **Advanced Options > URL Secret** in the setup wizard, or add to `.env`:
+   ```env
+   URL_SECRET=mysecret123
+   ```
+2. Your addon URL becomes:
    ```text
    https://<your-domain>/mysecret123/manifest.json
    ```
-   BitChord remembers the path prefix and includes it on subsequent stream and search requests. Calls missing the token receive a `401 Unauthorized`.
-3. **Uptime checks remain available:**
-   The `/ping` and `/icon.png` routes remain public so monitoring tools can ping the server without exposing your token.
+   Calls without the token receive HTTP `401 Unauthorized`.
+3. `/ping` and `/icon.png` stay public so uptime monitors and icons work without the secret.
 
-### 5. Keeping it running 24/7 (Preventing cold starts)
+---
 
-Free cloud containers often spin down after idle periods. You can keep the service responsive using free tools like [UptimeRobot](https://uptimerobot.com) or [Cron-Job.org](https://cron-job.org):
-- Configure an HTTP monitor targeting your health check:
+### Keeping it running 24/7 (cloud hosting only)
+
+Free cloud tiers (Render, Fly.io, Railway) spin containers down after idle periods. Use a free monitor like [UptimeRobot](https://uptimerobot.com) or [Cron-Job.org](https://cron-job.org) to keep yours awake:
+
+- Point it at your ping endpoint:
   ```text
-  https://<your-service-name>.onrender.com/ping
+  https://<your-service-name>/ping
   ```
-- Set the check interval to **every 10 minutes**.
-- This avoids cold-boot delays and ensures Telegram FLAC resolves immediately.
+- Check interval: **every 5 to 10 minutes**, depending on your provider's inactivity threshold. Render, for example, sleeps free web services after 15 minutes with no traffic.
 
-### 6. Add to BitChord
+---
 
-1. Open BitChord on Android.
-2. Go to **Settings** > **Sources**.
-3. Tap **Add Source** and paste your URL (e.g. `https://<your-service-name>.onrender.com`).
-4. BitChord validates your manifest and queries your vault whenever you play tracks.
+## WebDAV streaming
+
+Telegram Music includes a WebDAV server alongside the BitChord addon manifest. WebDAV streams tracks faster than the addon because it plays files directly without requesting the manifest or running search handshakes:
+
+- Works in BitChord (WebDAV source), Symfonium, VLC, Infuse, and Foobar2000.
+- Can be mounted as a network drive in Windows, macOS, or Linux file managers.
+- Supports HTTP 206 byte-range requests, seeking, and RAM pre-caching.
+
+### Authentication and credentials
+
+- **When using the secret URL (`https://<host>/<secret>/dav`):** No username or password is required. The secret is authenticated directly from the URL path.
+- **When an app prompts for Username and Password (`https://<host>/dav`):**
+  - **Username:** `admin` (or any text)
+  - **Password:** your `URL_SECRET` value from `.env`
+  - If `URL_SECRET` is left blank in your configuration, authentication is disabled and the server accepts anonymous connections.
+
+---
+
+## Channel commands and music search
+
+> [!IMPORTANT]
+> **Bot Token Required:** `/s` and `/song` only work when `TELEGRAM_BOT_TOKEN` is set. Without it, these commands do nothing. Configure it in Step 3 of the setup wizard or in `.env` (get one from [@BotFather](https://t.me/BotFather)). The bot posts the button menu; your personal account (MTProto) uploads the downloaded file. Both are needed.
+
+### Song search and downloads
+
+Send `/s` or `/song` in your channel to search and download lossless FLAC files:
+
+- **Interactive search:** `/song <query>` (example: `/song judas`) fetches Deezer results via your bot:
+  ```text
+  YourBot
+  🎧 Search Results for: "judas" [Deezer FLAC]
+
+  1. Lady Gaga - Judas (4:09)
+  2. Depeche Mode - Judas (5:14)
+  3. Fozzy - Judas (4:09)
+  4. Preaching Soul - Judas (Slowed & Reverb) (5:10)
+  5. Judas Priest - Breaking the Law (2:33)
+  6. Mc Romeu - Judas (4:40)
+  7. Josiah Queen - judas (3:31)
+
+  [ 1 ] [ 2 ] [ 3 ] [ 4 ] [ 5 ] [ 6 ] [ 7 ]
+  [ ❌ ] [ ➡️ ]
+  ```
+  - Tap `[ 1 ]` through `[ 7 ]` to download the track directly into your channel.
+  - Tap `➡️` to load the next page of results without sending new messages.
+  - Send `/s <url>` to paste a Spotify, Deezer, Tidal, or Qobuz track link directly.
+
+### Keeping duplicate songs
+
+To keep two versions of the same track (such as a 16-bit FLAC alongside a 24-bit master):
+
+- Add `/keep` to the file caption when uploading.
+- When a new file matches an existing track, the server waits **6 hours** before deleting the older copy. Reply to it with `/keep` within that window to save both.
+- When `TELEGRAM_BOT_TOKEN` is set, duplicate warnings and digests are posted by your bot, not your personal account.
+
+### User chatter auto-cleaner
+
+The channel listener deletes text messages, images, stickers, and spam from regular members. Audio files, bot menus, admin announcements, system alerts, and slash commands are left alone.
+
+---
+
+## How it works
+
+1. You upload audio (FLAC, ALAC, WAV, MP3, M4A, or Dolby Atmos M4A/EAC3) to your private channel.
+2. The server connects to Telegram via MTProto (GramJS) using your user session.
+3. It reads file headers, pulls audio metadata, and builds an in-memory search index.
+4. BitChord calls `/manifest.json`, `/search?q=...`, and `/stream/:id`.
+5. ExoPlayer streams audio from `/audio/:id` via HTTP 206 range requests.
+
+### Playback resolution flow
+
+1. BitChord starts on YouTube Music immediately to prevent buffering pauses.
+2. Simultaneously, it queries your Telegram addon and JioSaavn.
+3. Priority order:
+   - Track found in your Telegram channel: BitChord switches to your **Telegram FLAC / Dolby stream**.
+   - Not in Telegram: upgrades to **JioSaavn (320 kbps)**.
+   - Not on either: stays on **YouTube Music (160 kbps)**.
+
+---
 
 ## API Endpoints
 
-When `URL_SECRET` is active, all routes except `/ping` and `/icon.png` require the secret prefix (e.g. `/:secret/manifest.json`).
+When `URL_SECRET` is set, all routes except `/ping` and `/icon.png` require the secret prefix (for example `/:secret/manifest.json`).
 
 - `GET /manifest.json`: Addon manifest and capabilities.
-- `GET /search?q=:query&atmos=auto`: Fast in-memory track search with Atmos preference.
-- `GET /isrc/:code`: Exact track match by ISRC recording code (BitChord).
-- `GET /resolve-isrc?isrc=:code`: Exact track match by ISRC recording code (Eclipse Music).
+- `GET /install`: Mobile install page. Auto-copies the addon URL to clipboard on load, including when opened via QR code scan.
+- `GET /setup`: Web onboarding wizard.
+- `GET /search?q=:query&atmos=auto`: In-memory track search with Atmos preference.
+- `GET /isrc/:code`: Exact track match by ISRC (BitChord).
+- `GET /resolve-isrc?isrc=:code`: Exact track match by ISRC (Eclipse Music).
 - `GET /stream/:id`: Stream descriptors (FLAC or E-AC-3 JOC M4A) and media URL.
 - `GET /audio/:id`: HTTP 206 range-enabled audio streaming.
-- `GET /artwork/:id`: Album art extracts.
-- `GET /icon.png`: Addon logo for BitChord source listings (public).
+- `GET /artwork/:id`: Album art.
+- `OPTIONS /dav`, `PROPFIND /dav`, `GET /dav/:filename`: WebDAV directory listing and direct audio streaming.
+- `GET /icon.png`: Addon icon for BitChord source listings (public, no secret required).
 - `GET /notifications/status`: Deduplication state and notification settings.
-- `GET /notifications/flush`: Triggers an immediate cleanup summary flush.
-- `GET /debug/requests`: Ring buffer of the last 50 incoming requests.
-- `GET /debug/faststart`: Current statistics for the 10-track preamble cache.
+- `GET /notifications/flush`: Triggers an immediate cleanup digest.
+- `GET /debug/requests`: Last 50 incoming requests.
+- `GET /debug/faststart`: Preamble cache statistics.
 - `GET /ping`: Public health check for uptime monitors.

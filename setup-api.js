@@ -13,9 +13,39 @@ const envPath = path.join(__dirname, '.env');
 let activeSetup = null;
 let setupTimeout = null;
 let onConfigSavedCallback = null;
+let onRestartCallback = null;
+let getActiveClientFn = null;
+let getTracksCountFn = null;
 
 function setOnConfigSaved(fn) {
   onConfigSavedCallback = fn;
+}
+
+function setOnRestart(fn) {
+  onRestartCallback = fn;
+}
+
+function setGetActiveClient(fn) {
+  getActiveClientFn = fn;
+}
+
+function setGetTracksCount(fn) {
+  getTracksCountFn = fn;
+}
+
+function getLibraryTracksCount() {
+  if (typeof getTracksCountFn === 'function') {
+    const c = getTracksCountFn();
+    if (typeof c === 'number' && c >= 0) return c;
+  }
+  try {
+    const cachePath = path.join(__dirname, 'tracks_cache.json');
+    if (fs.existsSync(cachePath)) {
+      const arr = JSON.parse(fs.readFileSync(cachePath, 'utf8'));
+      if (Array.isArray(arr)) return arr.length;
+    }
+  } catch (_) {}
+  return 0;
 }
 
 function readEnvMap() {
@@ -95,9 +125,19 @@ router.get('/status', (req, res) => {
   const configured = Boolean(env.TELEGRAM_API_ID && env.TELEGRAM_API_HASH && env.TELEGRAM_SESSION_STRING && env.TELEGRAM_CHANNEL);
   res.json({
     configured,
+    tracksCount: getLibraryTracksCount(),
+    apiId: env.TELEGRAM_API_ID || (activeSetup?.apiId ? activeSetup.apiId.toString() : null),
+    apiHash: env.TELEGRAM_API_HASH || activeSetup?.apiHash || null,
+    phoneNumber: env.TELEGRAM_PHONE || activeSetup?.phoneNumber || null,
     channel: env.TELEGRAM_CHANNEL || null,
+    teledriveChannel: env.TELEDRIVE_CHANNEL || null,
     port: parseInt(env.PORT || '3000', 10),
+    enableBotSync: env.ENABLE_BOT_SYNC === 'true',
+    botToken: env.TELEGRAM_BOT_TOKEN || null,
     hasSecret: Boolean(env.URL_SECRET || env.ACCESS_TOKEN),
+    urlSecret: env.URL_SECRET || null,
+    customPublicUrl: env.PUBLIC_URL || null,
+    enableTunnel: env.ENABLE_CLOUDFLARE_TUNNEL !== 'false',
     tunnelActive: Boolean(tunnel.getTunnelUrl()),
     tunnelUrl: tunnel.getTunnelUrl(),
     tunnelInstalled: tunnel.isInstalled(),
@@ -142,7 +182,8 @@ router.post('/send-code', async (req, res) => {
     clearActiveSetup();
 
     const client = new TelegramClient(new StringSession(''), parsedApiId, cleanApiHash, {
-      connectionRetries: 5,
+      connectionRetries: 10,
+      useWSS: true,
     });
 
     await client.connect();
@@ -261,24 +302,36 @@ router.post('/verify-2fa', async (req, res) => {
 });
 
 router.get('/channels', async (req, res) => {
-  if (!activeSetup || !activeSetup.client || !activeSetup.isAuthorized) {
+  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
+  if (!currentClient && getActiveClientFn) {
+    const active = getActiveClientFn();
+    if (active && active.connected) {
+      currentClient = active;
+    }
+  }
+
+  if (!currentClient) {
     return res.status(401).json({ error: 'Please authorize Telegram first' });
   }
 
   try {
-    const dialogs = await activeSetup.client.getDialogs({ limit: 100 });
+    const dialogs = await currentClient.getDialogs({ limit: 100 });
     const channels = [];
 
     for (const d of dialogs) {
       if (d.isChannel || d.isGroup) {
         const entityId = d.entity.id ? d.entity.id.toString() : '';
         const fullId = entityId.startsWith('-100') ? entityId : `-100${entityId}`;
+        const isPrivate = !d.entity.username;
+        const isCreator = Boolean(d.entity.creator);
         channels.push({
           id: fullId,
           title: d.title || 'Untitled Channel',
           username: d.entity.username ? `@${d.entity.username}` : null,
           isChannel: Boolean(d.isChannel),
           isGroup: Boolean(d.isGroup),
+          isPrivate,
+          isCreator,
         });
       }
     }
@@ -307,65 +360,214 @@ router.get('/qr', async (req, res) => {
     });
 
     res.setHeader('Content-Type', 'image/svg+xml');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0');
     return res.send(svg);
   } catch (err) {
     return res.status(500).send('Failed to generate QR code');
   }
 });
 
+async function resolveAndValidateChannel(client, channelInput) {
+  if (!channelInput) throw new Error('Channel input cannot be empty.');
+  const rawInput = String(channelInput).trim();
+  let cleanInput = rawInput;
+
+  // Handle t.me URLs
+  if (cleanInput.includes('t.me/c/')) {
+    // Private channel link: https://t.me/c/1234567890/123
+    const match = cleanInput.match(/t\.me\/c\/(\d+)/);
+    if (match) {
+      cleanInput = `-100${match[1]}`;
+    }
+  } else if (cleanInput.includes('t.me/joinchat/')) {
+    cleanInput = cleanInput.trim();
+  } else if (cleanInput.startsWith('https://t.me/')) {
+    cleanInput = '@' + cleanInput.replace('https://t.me/', '').split('/')[0].replace(/^@/, '');
+  } else if (cleanInput.startsWith('t.me/')) {
+    cleanInput = '@' + cleanInput.replace('t.me/', '').split('/')[0].replace(/^@/, '');
+  }
+
+  const stripped = cleanInput.replace(/^-100/, '').replace(/^@/, '').toLowerCase();
+
+  // 1. Check user dialogs (populates access hashes for private channels)
+  try {
+    const dialogs = await client.getDialogs({ limit: 100 });
+    for (const d of dialogs) {
+      const entity = d.entity;
+      if (!entity) continue;
+      const entityId = entity.id ? entity.id.toString() : '';
+      const username = (entity.username || '').toLowerCase();
+      const title = (entity.title || '').toLowerCase();
+
+      if (
+        entityId === cleanInput ||
+        `-100${entityId}` === cleanInput ||
+        entityId === stripped ||
+        (username && username === stripped) ||
+        title === cleanInput.toLowerCase()
+      ) {
+        const fullId = entityId.startsWith('-100') ? entityId : `-100${entityId}`;
+        return {
+          id: fullId,
+          title: d.title || entity.title || 'Channel',
+          username: entity.username ? `@${entity.username}` : null,
+          matched: true,
+        };
+      }
+    }
+  } catch (_) {}
+
+  // 2. Direct getEntity resolution fallback
+  try {
+    const entity = await client.getEntity(cleanInput);
+    if (entity) {
+      const entityId = entity.id ? entity.id.toString() : '';
+      const fullId = entityId.startsWith('-100') ? entityId : `-100${entityId}`;
+      return {
+        id: fullId,
+        title: entity.title || entity.username || 'Channel',
+        username: entity.username ? `@${entity.username}` : null,
+        matched: true,
+      };
+    }
+  } catch (err) {
+    throw new Error(`Wrong channel ID, URL, or username. Could not find or access "${rawInput}". Please check that your Telegram account is a member or admin.`);
+  }
+
+  throw new Error(`Wrong channel ID, URL, or username. Could not find or access "${rawInput}". Please check that your Telegram account is a member or admin.`);
+}
+
+router.post('/validate-channel', async (req, res) => {
+  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
+  if (!currentClient && getActiveClientFn) {
+    const active = getActiveClientFn();
+    if (active && active.connected) {
+      currentClient = active;
+    }
+  }
+
+  if (!currentClient) {
+    return res.status(401).json({ error: 'Please authorize Telegram first.' });
+  }
+
+  const { channel } = req.body || {};
+  if (!channel || !String(channel).trim()) {
+    return res.status(400).json({ error: 'Please enter your channel ID, URL, or username.' });
+  }
+
+  try {
+    const validated = await resolveAndValidateChannel(currentClient, channel);
+    return res.json({ ok: true, channel: validated });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
 router.post('/save', async (req, res) => {
-  if (!activeSetup || !activeSetup.isAuthorized || !activeSetup.sessionString) {
+  const env = readEnvMap();
+  const apiIdToSave = (activeSetup && activeSetup.apiId) ? activeSetup.apiId.toString() : env.TELEGRAM_API_ID;
+  const apiHashToSave = (activeSetup && activeSetup.apiHash) ? activeSetup.apiHash : env.TELEGRAM_API_HASH;
+  const sessionToSave = (activeSetup && activeSetup.sessionString) ? activeSetup.sessionString : env.TELEGRAM_SESSION_STRING;
+
+  if (!apiIdToSave || !apiHashToSave || !sessionToSave) {
     return res.status(400).json({ error: 'Telegram session not authorized' });
   }
 
-  const { channel, teledriveChannel, enableBotSync, enableTunnel, customPublicUrl, urlSecret, port } = req.body || {};
+  const { channel, teledriveChannel, enableBotSync, botToken, enableTunnel, customPublicUrl, urlSecret, port } = req.body || {};
 
   if (!channel) {
-    return res.status(400).json({ error: 'Music channel is required' });
+    return res.status(400).json({ error: 'Telegram channel is required' });
+  }
+
+  if (enableBotSync && (!botToken || !String(botToken).trim())) {
+    return res.status(400).json({ error: 'Bot Token is required when Bot Automation is enabled' });
+  }
+
+  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
+  if (!currentClient && getActiveClientFn) {
+    const active = getActiveClientFn();
+    if (active && active.connected) {
+      currentClient = active;
+    }
+  }
+
+  let resolvedChannel = String(channel).trim();
+  if (currentClient) {
+    try {
+      const validated = await resolveAndValidateChannel(currentClient, channel);
+      resolvedChannel = validated.id || resolvedChannel;
+    } catch (valErr) {
+      return res.status(400).json({ error: valErr.message });
+    }
   }
 
   try {
     const updates = {
-      TELEGRAM_API_ID: activeSetup.apiId.toString(),
-      TELEGRAM_API_HASH: activeSetup.apiHash,
-      TELEGRAM_SESSION_STRING: activeSetup.sessionString,
-      TELEGRAM_CHANNEL: String(channel).trim(),
+      TELEGRAM_API_ID: apiIdToSave,
+      TELEGRAM_API_HASH: apiHashToSave,
+      TELEGRAM_SESSION_STRING: sessionToSave,
+      TELEGRAM_CHANNEL: resolvedChannel,
     };
 
-    if (teledriveChannel && String(teledriveChannel).trim()) {
-      updates.TELEDRIVE_CHANNEL = String(teledriveChannel).trim();
+    if (activeSetup && activeSetup.phoneNumber) {
+      updates.TELEGRAM_PHONE = activeSetup.phoneNumber;
     }
-    if (urlSecret && String(urlSecret).trim()) {
+    if (botToken !== undefined) {
+      if (String(botToken).trim()) {
+        updates.TELEGRAM_BOT_TOKEN = String(botToken).trim();
+      } else {
+        updates.TELEGRAM_BOT_TOKEN = '';
+      }
+    }
+    if (teledriveChannel !== undefined) {
+      if (String(teledriveChannel).trim()) {
+        updates.TELEDRIVE_CHANNEL = String(teledriveChannel).trim();
+      } else {
+        updates.TELEDRIVE_CHANNEL = '';
+      }
+    }
+    if (urlSecret !== undefined) {
       updates.URL_SECRET = String(urlSecret).trim();
     }
-    if (port && !isNaN(parseInt(port, 10))) {
-      updates.PORT = parseInt(port, 10).toString();
+    let parsedPort = 3000;
+    if (port !== undefined && String(port).trim() !== '') {
+      const p = parseInt(port, 10);
+      if (!isNaN(p) && p >= 1024 && p <= 65535) {
+        parsedPort = p;
+      }
     }
+    updates.PORT = parsedPort.toString();
     if (enableBotSync !== undefined) {
       updates.ENABLE_BOT_SYNC = enableBotSync ? 'true' : 'false';
     }
     if (enableTunnel !== undefined) {
       updates.ENABLE_CLOUDFLARE_TUNNEL = enableTunnel ? 'true' : 'false';
     }
-    if (customPublicUrl && String(customPublicUrl).trim()) {
+    if (customPublicUrl !== undefined) {
       updates.PUBLIC_URL = String(customPublicUrl).trim().replace(/\/+$/, '');
     }
 
     writeEnvKeys(updates);
+    for (const [k, v] of Object.entries(updates)) {
+      process.env[k] = v;
+    }
 
     let baseOrigin = '';
+    if (updates.PUBLIC_URL) {
+      baseOrigin = updates.PUBLIC_URL;
+    }
+
     if (enableTunnel) {
       try {
         const tunnelUrl = await tunnel.startTunnel(parseInt(updates.PORT || '3000', 10));
-        baseOrigin = tunnelUrl;
+        if (!baseOrigin) {
+          baseOrigin = tunnelUrl;
+        }
       } catch (tunnelErr) {
         console.warn('Could not auto-start Cloudflare tunnel:', tunnelErr.message);
       }
-    }
-
-    if (!baseOrigin && updates.PUBLIC_URL) {
-      baseOrigin = updates.PUBLIC_URL;
+    } else {
+      tunnel.stopTunnel();
     }
 
     if (!baseOrigin) {
@@ -386,6 +588,7 @@ router.post('/save', async (req, res) => {
     return res.json({
       ok: true,
       manifestUrl,
+      tracksCount: getLibraryTracksCount(),
       config: {
         channel: updates.TELEGRAM_CHANNEL,
         hasSecret: Boolean(updates.URL_SECRET),
@@ -398,10 +601,35 @@ router.post('/save', async (req, res) => {
   }
 });
 
+router.post('/restart', async (req, res) => {
+  try {
+    if (typeof onRestartCallback === 'function') {
+      const result = await onRestartCallback();
+      return res.json({
+        ok: true,
+        message: 'Server services restarted successfully',
+        tracksCount: getLibraryTracksCount(),
+        ...(result || {})
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: 'Server services ready',
+      tracksCount: getLibraryTracksCount()
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Failed to restart server services' });
+  }
+});
+
 module.exports = {
   router,
   readEnvMap,
   writeEnvKeys,
   isConfigured,
   setOnConfigSaved,
+  setOnRestart,
+  setGetActiveClient,
+  setGetTracksCount,
 };
