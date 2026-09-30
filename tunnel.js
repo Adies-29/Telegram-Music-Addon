@@ -120,7 +120,7 @@ function startTunnel(port = 3000) {
   startingPromise = new Promise(async (resolve, reject) => {
     try {
       const bin = await ensureInstalled();
-      const args = ['tunnel', '--url', `http://localhost:${port}`];
+      const args = ['tunnel', '--url', `http://127.0.0.1:${port}`];
 
       tunnelProcess = spawn(bin, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
