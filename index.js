@@ -13,15 +13,6 @@ const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { NewMessage } = require('telegram/events');
 const mm = require('music-metadata');
-const {
-  handleSongCommand,
-  hasActivePicker,
-  isPickerMenu,
-  handlePickerChoice,
-  cancelPicker,
-  navigateBotPicker,
-} = require('./downloader');
-
 const setupApi = require('./setup-api');
 const tunnel = require('./tunnel');
 
@@ -126,19 +117,19 @@ function isAudioDocument(doc) {
 
 // Known composer duos that are hyphenated in tags but separated on streaming services
 const COMPOSER_DUOS = [
-  [/vishal[-\s–—]+shekhar/gi, 'Vishal & Shekhar'],
-  [/sachin[-\s–—]+jigar/gi, 'Sachin & Jigar'],
-  [/salim[-\s–—]+sulaiman/gi, 'Salim & Sulaiman'],
-  [/shankar[-\s–—]+ehsaan[-\s–—]+loy/gi, 'Shankar & Ehsaan & Loy'],
-  [/ajay[-\s–—]+atul/gi, 'Ajay & Atul'],
-  [/sajid[-\s–—]+wajid/gi, 'Sajid & Wajid'],
-  [/nadeem[-\s–—]+shravan/gi, 'Nadeem & Shravan'],
-  [/jatin[-\s–—]+lalit/gi, 'Jatin & Lalit'],
-  [/anand[-\s–—]+milind/gi, 'Anand & Milind'],
-  [/laxmikant[-\s–—]+pyarelal/gi, 'Laxmikant & Pyarelal'],
-  [/kalyanji[-\s–—]+anandji/gi, 'Kalyanji & Anandji'],
-  [/shiv[-\s–—]+hari/gi, 'Shiv & Hari'],
-  [/raam[-\s–—]+laxman/gi, 'Raam & Laxman'],
+  [/vishal[-\s\u2013\u2014]+shekhar/gi, 'Vishal & Shekhar'],
+  [/sachin[-\s\u2013\u2014]+jigar/gi, 'Sachin & Jigar'],
+  [/salim[-\s\u2013\u2014]+sulaiman/gi, 'Salim & Sulaiman'],
+  [/shankar[-\s\u2013\u2014]+ehsaan[-\s\u2013\u2014]+loy/gi, 'Shankar & Ehsaan & Loy'],
+  [/ajay[-\s\u2013\u2014]+atul/gi, 'Ajay & Atul'],
+  [/sajid[-\s\u2013\u2014]+wajid/gi, 'Sajid & Wajid'],
+  [/nadeem[-\s\u2013\u2014]+shravan/gi, 'Nadeem & Shravan'],
+  [/jatin[-\s\u2013\u2014]+lalit/gi, 'Jatin & Lalit'],
+  [/anand[-\s\u2013\u2014]+milind/gi, 'Anand & Milind'],
+  [/laxmikant[-\s\u2013\u2014]+pyarelal/gi, 'Laxmikant & Pyarelal'],
+  [/kalyanji[-\s\u2013\u2014]+anandji/gi, 'Kalyanji & Anandji'],
+  [/shiv[-\s\u2013\u2014]+hari/gi, 'Shiv & Hari'],
+  [/raam[-\s\u2013\u2014]+laxman/gi, 'Raam & Laxman'],
 ];
 
 function formatArtistForClient(artistStr) {
@@ -147,7 +138,7 @@ function formatArtistForClient(artistStr) {
   for (const [pattern, replacement] of COMPOSER_DUOS) {
     formatted = formatted.replace(pattern, replacement);
   }
-  formatted = formatted.replace(/\s+[-–—]+\s+/g, ', ');
+  formatted = formatted.replace(/\s+[-\u2013\u2014]+\s+/g, ', ');
   return formatted.trim();
 }
 
@@ -216,8 +207,11 @@ function updateMediaCacheCapacity() {
     mediaCache.maxSize = dynamicCap;
   }
 }
-const fastStartCache = new SimpleLRU(3);
+const fastStartCache = new SimpleLRU(6);
 const FAST_START_BYTES = 6 * 1024 * 1024; // Exactly 12 blocks of 512KB (6.0 MB)
+
+// LRU cache for audio headers and tag slices (128KB - 256KB, up to 150 tracks)
+const tagSliceCache = new SimpleLRU(150);
 
 const recentRequests = [];
 function recordRequest(entry) {
@@ -231,6 +225,13 @@ let lastSeekLogTime = 0;
 let lastSeekStart = 0;
 let lastServedAudioTrackId = null;
 let lastLogWasBlank = false;
+
+const origStderrWrite = process.stderr.write;
+process.stderr.write = function (chunk, ...args) {
+  const str = chunk ? chunk.toString() : '';
+  if (str.includes('TimeoutNegativeWarning') || str.includes('Timeout duration was set to 1') || str.includes('localstorage-file')) return true;
+  return origStderrWrite.apply(process.stderr, [chunk, ...args]);
+};
 
 const BOLD   = '\x1b[1m';
 const DIM    = '\x1b[2m';
@@ -257,7 +258,7 @@ function getCliTag(tag) {
 
 function logCli(tag, msg) {
   const upperTag = tag.toUpperCase();
-  if (isStartupComplete && !hasInsertedStartupGap && ['SEARCH', 'STREAM', 'PRECACHE', 'BUFFER', 'SEEK', 'PROBE'].includes(upperTag)) {
+  if (isStartupComplete && !hasInsertedStartupGap && ['SEARCH', 'STREAM', 'PRECACHE', 'BUFFER', 'SEEK', 'PROBE', 'WEBDAV'].includes(upperTag)) {
     hasInsertedStartupGap = true;
     console.log('');
   }
@@ -265,6 +266,9 @@ function logCli(tag, msg) {
   const pad = (n) => String(n).padStart(2, '0');
   const timeStr = `${DIM}${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${RESET}`;
   console.log(`${timeStr} ${getCliTag(tag)} ${msg}`);
+  if (upperTag === 'LIBRARY') {
+    hasInsertedStartupGap = false;
+  }
   lastLogWasBlank = false;
 }
 
@@ -530,9 +534,12 @@ async function prewarmTrackPreamble(trackId, media, title) {
         if (preambleChunks.length > 0) {
           const preamble = Buffer.concat(preambleChunks);
           fastStartCache.set(idStr, preamble);
-          if (bytesCollected >= FAST_START_BYTES) {
-            const prewarmMb = (preamble.length / (1024 * 1024)).toFixed(1);
-            logCli('BUFFER', `Prewarmed ${BOLD}${prewarmMb} MB${RESET} -> ID: ${BOLD}${idStr}${RESET}`);
+          tagSliceCache.set(idStr, preamble.slice(0, Math.min(preamble.length, 256 * 1024)));
+          if (bytesCollected >= FAST_START_BYTES || !iter.left) {
+            const sizeFormatted = preamble.length >= 1024 * 1024
+              ? `${(preamble.length / (1024 * 1024)).toFixed(1)} MB`
+              : `${Math.round(preamble.length / 1024)} KB`;
+            logCli('BUFFER', `Prewarmed ${BOLD}${sizeFormatted}${RESET} -> ID: ${BOLD}${idStr}${RESET}`);
           }
         }
         iter.left = 0;
@@ -794,7 +801,7 @@ function normalizeTitle(t) {
     .toLowerCase()
     .replace(/\((?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?|radio edit|clean|explicit|atmos|dolby\s*atmos).*?\)/gi, '')
     .replace(/\[(?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?|radio edit|clean|explicit|atmos|dolby\s*atmos).*?\]/gi, '')
-    .replace(/\s*[-–—]\s*(?:radio edit|original mix|single|clean|explicit|atmos|dolby\s*atmos|new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|from\s+.*?)$/gi, '')
+    .replace(/\s*[-\u2013\u2014]\s*(?:radio edit|original mix|single|clean|explicit|atmos|dolby\s*atmos|new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|from\s+.*?)$/gi, '')
     .replace(/[^\w\s]/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -802,8 +809,8 @@ function normalizeTitle(t) {
 
 function getCoreTitle(str) {
   if (!str) return '';
-  if (str.includes(' - ') || str.includes(' – ') || str.includes(' — ')) {
-    const parts = str.split(/\s+[-–—]+\s+/);
+  if (str.includes(' - ') || str.includes(' \u2013 ') || str.includes(' \u2014 ')) {
+    const parts = str.split(/\s+[-\u2013\u2014]+\s+/);
     return normalizeTitle(parts[parts.length - 1]);
   }
   return normalizeTitle(str);
@@ -819,9 +826,9 @@ function normalizeArtist(a) {
 }
 
 function extractVersionTag(title) {
-  if (!title) return null;
+  if (!title) return '';
   const match = title.match(/[\(\[\{](?:version|remix|acoustic|instrumental|lofi|jhankar|slowed|reverb|live|female|male|unplugged|radio edit|original mix|extended mix|club mix|revisited|soundtrack|ost).*?[\)\]\}]|[-\u2013\u2014]\s*(?:version|remix|acoustic|instrumental|lofi|jhankar|slowed|reverb|live|female|male|unplugged|radio edit|original mix|extended mix|club mix|revisited|soundtrack|ost)$/i);
-  return match ? match[0].toLowerCase().trim() : null;
+  return match ? match[0].toLowerCase().replace(/[^\w]/g, '') : '';
 }
 
 function isDuplicate(a, b) {
@@ -834,16 +841,16 @@ function isDuplicate(a, b) {
     return false;
   }
 
-  // Protect deliberate distinct versions/remixes from accidental deletion
-  const verA = extractVersionTag(a.title) || extractVersionTag(a.fileName);
-  const verB = extractVersionTag(b.title) || extractVersionTag(b.fileName);
-  if (verA && verB && verA !== verB) {
-    return false;
-  }
-
   // Exact ISRC match: identical master recording
   if (a.isrc && b.isrc && String(a.isrc).trim().toUpperCase() === String(b.isrc).trim().toUpperCase()) {
     return true;
+  }
+
+  // Preserve distinct musical arrangements (Remixes, Acoustic, Instrumental, Live, etc.)
+  const tagA = extractVersionTag(a.title);
+  const tagB = extractVersionTag(b.title);
+  if (tagA !== tagB) {
+    return false;
   }
 
   if (a.duration && b.duration && Math.abs(a.duration - b.duration) > 15) {
@@ -1063,13 +1070,24 @@ async function sendChannelMessage(text, options = {}) {
         payload.reply_to_message_id = parseInt(options.replyTo, 10);
       }
 
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      let res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      let data = await res.json();
+      if (!data.ok && payload.reply_to_message_id) {
+        // Broadcast channel or chat may reject reply_to_message_id; retry without it
+        delete payload.reply_to_message_id;
+        res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        data = await res.json();
+      }
+
       if (data.ok && data.result) {
         return {
           id: data.result.message_id,
@@ -1089,7 +1107,15 @@ async function sendChannelMessage(text, options = {}) {
       const gramOptions = { message: text };
       if (options.parseMode) gramOptions.parseMode = options.parseMode;
       if (options.replyTo) gramOptions.replyTo = parseInt(options.replyTo, 10);
-      return await client.sendMessage(channelEntity, gramOptions);
+      try {
+        return await client.sendMessage(channelEntity, gramOptions);
+      } catch (gramErr) {
+        if (gramOptions.replyTo) {
+          delete gramOptions.replyTo;
+          return await client.sendMessage(channelEntity, gramOptions);
+        }
+        throw gramErr;
+      }
     } catch (err) {
       console.warn('[Channel Notification Error]:', err.message);
       return null;
@@ -1147,8 +1173,13 @@ async function deleteMessageViaBot(msgId) {
         body: JSON.stringify({ chat_id: tgChatId, message_id: parseInt(msgId, 10) }),
       });
       const data = await res.json();
+      if (!data.ok) {
+        console.warn(`[Bot Delete Warning] Message ${msgId}: ${data.description || 'Bad Request'}`);
+      }
       return Boolean(data.ok && data.result);
-    } catch (_) {}
+    } catch (err) {
+      console.warn(`[Bot Delete Error] Message ${msgId}:`, err.message);
+    }
   }
   return false;
 }
@@ -1365,15 +1396,15 @@ async function deduplicateEntireLibrary() {
   if (removed.length > 0) {
     trackIndex = kept;
     saveCache();
-    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded • Removed ${BOLD}${removed.length}${RESET} duplicates`);
+    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded ${DIM}• Removed ${removed.length} duplicates${RESET}`);
     await flushDigestNotifications();
   } else {
-    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded • Deduplication 100% clean`);
+    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded ${DIM}• Deduplication 100% clean${RESET}`);
   }
 
   await cleanupOrphanedDuplicateNotices().catch(() => {});
 
-  return { checked: sorted.length, duplicatesRemoved: removed.length, removed };
+  return { checked: trackIndex.length, duplicatesRemoved: removed.length, removed };
 }
 
 let isIndexing = false;
@@ -1504,7 +1535,7 @@ app.use((req, res, next) => {
   console.warn(`[Security] Blocked unauthorized request to ${req.originalUrl || req.url} from ${req.ip}`);
   return res.status(401).json({
     error: 'Unauthorized: invalid or missing secret path',
-    message: 'This Telegram Music instance requires a valid secret URL prefix (e.g. /:secret/manifest.json)',
+    message: 'This Telegram Music Addon instance requires a valid secret URL prefix (e.g. /:secret/manifest.json)',
   });
 });
 
@@ -1544,7 +1575,7 @@ app.get('/manifest.json', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=600');
   res.json({
     id: 'com.personal.telegrammusic',
-    name: 'Telegram Music',
+    name: 'Telegram Music Addon',
     version: `${pkg.version} • ${trackIndex.length} songs`,
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     icon: `${base}/icon.png`,
@@ -1702,7 +1733,7 @@ app.all('/clean-lossy', async (req, res) => {
 const ARTIST_SEPARATORS_REGEX = /\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*/i;
 const BRACKETED_REGEX = /[([][^()[\]]*[)\]]/g;
 const NOISE_WORDS_REGEX = /\b(?:official|video|audio|lyrics|lyric|lyrical|song|songs|full|hd|hq|4k|mp3|flac|ost|soundtrack|remaster|remastered|atmos|dolby)\b/gi;
-const VERSION_SUFFIX_REGEX = /\s+[-–—]+\s+(?:new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|original mix|extended mix|deluxe).*$/gi;
+const VERSION_SUFFIX_REGEX = /\s+[-\u2013\u2014]+\s+(?:new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|original mix|extended mix|deluxe).*$/gi;
 
 function extractCoreTitle(title) {
   if (!title) return '';
@@ -2200,7 +2231,8 @@ app.get('/artwork/:id', async (req, res) => {
     if (stripped) {
       const jpg = utils.strippedPhotoToJpg(stripped.bytes);
       res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+      res.setHeader('ETag', `"${track.id}-art"`);
       return res.send(jpg);
     }
 
@@ -2224,7 +2256,8 @@ app.get('/artwork/:id', async (req, res) => {
     }
 
     res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.setHeader('ETag', `"${track.id}-art"`);
     res.send(thumbBuf);
   } catch (err) {
     console.error('Artwork fetch error:', err.message);
@@ -2305,8 +2338,41 @@ async function streamAudioTrack(trackId, req, res) {
     end = Math.max(start, Math.min(end, totalSize - 1));
     const bytesNeeded = end - start + 1;
 
-    // Detect bounded metadata/artwork reads (e.g. BitChord extracting FLAC PICTURE blocks on scroll)
-    const isMetadataOrArtSlice = isRange && (start > 0) && (end < 5 * 1024 * 1024);
+    // Detect if request originated from WebDAV (/dav)
+    const isWebDav = Boolean(
+      (req.originalUrl && req.originalUrl.includes('/dav')) ||
+      (req.baseUrl && req.baseUrl.includes('/dav')) ||
+      (req.path && req.path.includes('/dav'))
+    );
+
+    // Fast cache validation
+    if (!isRange && req.headers['if-none-match'] === `"${track.id}-${totalSize}"`) {
+      return res.status(304).end();
+    }
+
+    // Return cached header or tag slice when available
+    if (tagSliceCache.has(trackId)) {
+      const cachedTagBuf = tagSliceCache.get(trackId);
+      if (cachedTagBuf && start < cachedTagBuf.length) {
+        const availableInTagCache = cachedTagBuf.length - start;
+        if (availableInTagCache >= bytesNeeded) {
+          res.status(isRange ? 206 : 200);
+          res.setHeader('Content-Type', track.isAtmos ? 'audio/mp4' : (track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream')));
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Connection', 'keep-alive');
+          res.setHeader('Keep-Alive', 'timeout=30, max=100');
+          res.setHeader('Content-Length', bytesNeeded);
+          if (isRange) {
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+          }
+          res.setHeader('ETag', `"${track.id}-${totalSize}"`);
+          res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+          if (req.method === 'HEAD') return res.end();
+          return res.send(cachedTagBuf.slice(start, start + bytesNeeded));
+        }
+      }
+    }
+
     const isAudition = (start === 0 && bytesNeeded <= 128 * 1024);
     const isPlaybackStart = (start === 0 && bytesNeeded > 128 * 1024);
 
@@ -2333,14 +2399,14 @@ async function streamAudioTrack(trackId, req, res) {
         const sizeMb = (totalSize / (1024 * 1024)).toFixed(1);
         const spec = track.isAtmos ? 'Dolby Atmos' : (track.quality || track.format);
         const durPartFormatted = durStr ? ` ${DIM}(${durStr})${RESET}` : '';
-        const tag = isRange ? 'STREAM' : 'PRECACHE';
+        const tag = isWebDav ? 'WEBDAV' : (isRange ? 'STREAM' : 'PRECACHE');
         logCli(tag, `${ITALIC}${track.title}${RESET} • ${BOLD}${spec}${RESET} • ${BOLD}${sizeMb} MB${RESET}${durPartFormatted} ${DIM}-> ${statusStr}${RESET}`);
       }
     };
 
-    if (isAudition && process.env.DEBUG_PROBES === 'true') {
+    if (isAudition && !isWebDav && process.env.DEBUG_PROBES === 'true') {
       logCli('PROBE', `${ITALIC}${track.title}${RESET} ${DIM}(${Math.round(bytesNeeded / 1024)} KB header read)${RESET}`);
-    } else if (isRange && start >= 7 * 1024 * 1024 && bytesNeeded > 128 * 1024) {
+    } else if (isRange && start >= 10 * 1024 * 1024 && bytesNeeded > 128 * 1024) {
       const now = Date.now();
       if ((now - lastSeekLogTime > 2000) || Math.abs(start - lastSeekStart) > 2 * 1024 * 1024) {
         lastSeekLogTime = now;
@@ -2373,6 +2439,8 @@ async function streamAudioTrack(trackId, req, res) {
     if (isRange) {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
+    res.setHeader('ETag', `"${track.id}-${totalSize}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
 
     if (req.method === 'HEAD') {
       return res.end();
@@ -2380,7 +2448,7 @@ async function streamAudioTrack(trackId, req, res) {
 
     // Telegram MTProto upload.GetFile requires requestSize to be a power of 2 (up to 512KB)
     // and offset MUST be an exact multiple of requestSize (offset % requestSize === 0).
-    const dynamicBlockSize = (start > 0 && bytesNeeded <= 128 * 1024) ? (128 * 1024) : (512 * 1024);
+    const dynamicBlockSize = (bytesNeeded <= 128 * 1024) ? (128 * 1024) : (512 * 1024);
 
     // Fast-Start RAM cache check
     let bytesSent = 0;
@@ -2397,6 +2465,9 @@ async function streamAudioTrack(trackId, req, res) {
 
     if (useFastStart) {
       const preambleSlice = cachedPreamble.slice(start, Math.min(cachedPreamble.length, start + bytesNeeded));
+      if (!tagSliceCache.has(trackId)) {
+        tagSliceCache.set(trackId, cachedPreamble.slice(0, Math.min(cachedPreamble.length, 256 * 1024)));
+      }
       const canContinue = res.write(preambleSlice);
       bytesSent += preambleSlice.length;
       maybeLogPlayback(bytesSent);
@@ -2440,6 +2511,13 @@ async function streamAudioTrack(trackId, req, res) {
             break;
           }
 
+          if (start === 0 && !tagSliceCache.has(trackId)) {
+            const sliceLen = Math.min(256 * 1024, chunk.length);
+            if (sliceLen > 0) {
+              tagSliceCache.set(trackId, chunk.slice(0, sliceLen));
+            }
+          }
+
           // Populate/extend fastStartCache up to FAST_START_BYTES only for real playback starts (start === 0)
           // This prevents background tag reads from evicting playing songs from RAM cache!
           if (start === 0 && alignedOffset === cacheBytesCollected && cacheBytesCollected < FAST_START_BYTES) {
@@ -2450,10 +2528,17 @@ async function streamAudioTrack(trackId, req, res) {
             if (cacheBytesCollected >= FAST_START_BYTES || cacheBytesCollected >= totalSize) {
               const fullPreamble = Buffer.concat(preambleChunks);
               fastStartCache.set(trackId, fullPreamble);
-              const capturedMb = (fullPreamble.length / (1024 * 1024)).toFixed(1);
-              logCli('BUFFER', `Prewarmed ${BOLD}${capturedMb} MB${RESET} -> ID: ${BOLD}${trackId}${RESET}`);
+              tagSliceCache.set(trackId, fullPreamble.slice(0, Math.min(fullPreamble.length, 256 * 1024)));
+              const sizeFormatted = fullPreamble.length >= 1024 * 1024
+                ? `${(fullPreamble.length / (1024 * 1024)).toFixed(1)} MB`
+                : `${Math.round(fullPreamble.length / 1024)} KB`;
+              if (!isWebDav) {
+                logCli('BUFFER', `Prewarmed ${BOLD}${sizeFormatted}${RESET} -> ID: ${BOLD}${trackId}${RESET}`);
+              }
             } else {
-              fastStartCache.set(trackId, Buffer.concat(preambleChunks));
+              const partial = Buffer.concat(preambleChunks);
+              fastStartCache.set(trackId, partial);
+              tagSliceCache.set(trackId, partial.slice(0, Math.min(partial.length, 256 * 1024)));
             }
           }
 
@@ -2535,15 +2620,19 @@ function sanitizeWebDavName(name) {
 
 const webDavFileMap = new Map();
 
+function getTrackWebDavAlbum(track) {
+  if (track && track._webDavAlbum) return track._webDavAlbum;
+  const rawAlbum = (track && track.album) ? String(track.album).trim() : '';
+  const album = sanitizeWebDavName(rawAlbum) || 'Singles';
+  if (track) track._webDavAlbum = album;
+  return album;
+}
+
 function getTrackWebDavFileName(track) {
   if (track && track._webDavFileName) return track._webDavFileName;
   const ext = track.format === 'flac' ? 'flac' : (track.format === 'alac' ? 'm4a' : (track.isAtmos || track.format === 'eac3-joc' ? 'm4a' : (track.format || 'flac')));
   const artist = sanitizeWebDavName(track.artist || 'Unknown Artist');
-  let title = sanitizeWebDavName(track.title || 'Untitled');
-  const isDolby = Boolean(track.isAtmos || track.format === 'eac3-joc' || (track.quality && /atmos/i.test(track.quality)));
-  if (isDolby && !/atmos/i.test(title)) {
-    title = `${title} (Dolby Atmos)`;
-  }
+  const title = sanitizeWebDavName(track.title || 'Untitled');
   return `${artist} - ${title}.${ext}`;
 }
 
@@ -2553,13 +2642,10 @@ function rebuildWebDavFileMap() {
   for (const track of trackIndex) {
     const ext = track.format === 'flac' ? 'flac' : (track.format === 'alac' ? 'm4a' : (track.isAtmos || track.format === 'eac3-joc' ? 'm4a' : (track.format || 'flac')));
     const artist = sanitizeWebDavName(track.artist || 'Unknown Artist');
-    let title = sanitizeWebDavName(track.title || 'Untitled');
-    const isDolby = Boolean(track.isAtmos || track.format === 'eac3-joc' || (track.quality && /atmos/i.test(track.quality)));
-    if (isDolby && !/atmos/i.test(title)) {
-      title = `${title} (Dolby Atmos)`;
-    }
+    const title = sanitizeWebDavName(track.title || 'Untitled');
+    const album = getTrackWebDavAlbum(track);
     const baseClean = `${artist} - ${title}`;
-    const baseKey = baseClean.toLowerCase();
+    const baseKey = `${album.toLowerCase()}:::${baseClean.toLowerCase()}`;
 
     let finalName = `${baseClean}.${ext}`;
     if (seenCount.has(baseKey)) {
@@ -2571,6 +2657,12 @@ function rebuildWebDavFileMap() {
     }
 
     track._webDavFileName = finalName;
+    track._webDavAlbum = album;
+
+    const fullPathKey = `${album.toLowerCase()}/${finalName.toLowerCase()}`;
+    webDavFileMap.set(fullPathKey, track.id);
+    webDavFileMap.set(`${encodeURIComponent(album).toLowerCase()}/${encodeURIComponent(finalName).toLowerCase()}`, track.id);
+
     webDavFileMap.set(finalName.toLowerCase(), track.id);
     webDavFileMap.set(encodeURIComponent(finalName).toLowerCase(), track.id);
   }
@@ -2582,7 +2674,15 @@ function getTrackIdFromWebDavPath(urlPath) {
   try {
     decoded = decodeURIComponent(urlPath);
   } catch (_) {}
-  const segments = decoded.replace(/^\/+/, '').split('/');
+  const segments = decoded.replace(/^\/+/, '').split('/').filter(Boolean);
+  if (segments.length >= 2) {
+    const albumFolder = segments[segments.length - 2].trim().toLowerCase();
+    const fileName = segments[segments.length - 1].trim().toLowerCase();
+    const combinedKey = `${albumFolder}/${fileName}`;
+    if (webDavFileMap.has(combinedKey)) {
+      return webDavFileMap.get(combinedKey);
+    }
+  }
   const targetFile = (segments[segments.length - 1] || '').trim().toLowerCase();
   if (webDavFileMap.has(targetFile)) {
     return webDavFileMap.get(targetFile);
@@ -2698,7 +2798,8 @@ app.all(['/dav', '/dav/*'], async (req, res) => {
       if (depth !== '0') {
         for (const track of trackIndex) {
           const fileName = getTrackWebDavFileName(track);
-          const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+          const album = getTrackWebDavAlbum(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(album)}/${encodeURIComponent(fileName)}`;
           xml += buildWebDavFileXml(itemHref, fileName, track);
         }
       }
@@ -2707,15 +2808,38 @@ app.all(['/dav', '/dav/*'], async (req, res) => {
       return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
     }
 
-    // Specific file PROPFIND: /dav/Artist - Title [123].flac (or within subfolder if any client queries)
-    const trackId = getTrackIdFromWebDavPath(subPath);
+    // Check if subPath is an album collection (e.g. /dav/House%20Of%20Balloons or /dav/House%20Of%20Balloons/)
+    const matchingTracks = trackIndex.filter(t => getTrackWebDavAlbum(t).toLowerCase() === subPath.toLowerCase());
+    if (matchingTracks.length > 0) {
+      const albumName = getTrackWebDavAlbum(matchingTracks[0]);
+      let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+      xml += buildWebDavCollectionXml(`${basePrefix}/dav/${encodeURIComponent(albumName)}/`, albumName);
+      if (depth !== '0') {
+        for (const track of matchingTracks) {
+          const fileName = getTrackWebDavFileName(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(albumName)}/${encodeURIComponent(fileName)}`;
+          xml += buildWebDavFileXml(itemHref, fileName, track);
+        }
+      }
+      xml += `</D:multistatus>`;
+      return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+    }
+
+    // Specific file PROPFIND: /dav/Album/Artist - Title.flac or /dav/Artist - Title.flac
+    const targetFile = segments.length > 0 ? segments[segments.length - 1] : subPath;
+    const trackId = getTrackIdFromWebDavPath(subPath) || getTrackIdFromWebDavPath(targetFile);
     const track = trackId ? findTrack(trackId) : null;
     if (!track) {
       return res.status(404).send('Not found');
     }
 
+    if (!tagSliceCache.has(String(track.id)) && !fastStartCache.has(String(track.id))) {
+      prewarmTrackPreamble(String(track.id), null, track.title).catch(() => {});
+    }
+
     const fileName = getTrackWebDavFileName(track);
-    const itemHref = `${basePrefix}/dav/${encodeURIComponent(fileName)}`;
+    const album = getTrackWebDavAlbum(track);
+    const itemHref = `${basePrefix}/dav/${encodeURIComponent(album)}/${encodeURIComponent(fileName)}`;
     let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
     xml += buildWebDavFileXml(itemHref, fileName, track);
     xml += `</D:multistatus>`;
@@ -2729,9 +2853,14 @@ app.all(['/dav', '/dav/*'], async (req, res) => {
     }
 
     const targetFile = segments.length > 0 ? segments[segments.length - 1] : subPath;
-    const trackId = getTrackIdFromWebDavPath(targetFile) || getTrackIdFromWebDavPath(subPath);
+    const trackId = getTrackIdFromWebDavPath(subPath) || getTrackIdFromWebDavPath(targetFile);
     if (!trackId) {
       return res.status(404).send('File not found in library');
+    }
+
+    const track = findTrack(trackId);
+    if (track && !tagSliceCache.has(String(trackId)) && !fastStartCache.has(String(trackId))) {
+      prewarmTrackPreamble(String(trackId), null, track.title).catch(() => {});
     }
 
     return streamAudioTrack(trackId, req, res);
@@ -2918,45 +3047,6 @@ async function isFromBot(msg) {
   return false;
 }
 
-async function startBotCallbackPoller(botToken) {
-  let offset = 0;
-  logCli('BOT', `Inline button callback poller active`);
-  while (true) {
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=25&allowed_updates=["callback_query"]`);
-      const data = await res.json();
-      if (data.ok && data.result) {
-        for (const update of data.result) {
-          offset = update.update_id + 1;
-          const cq = update.callback_query;
-          if (!cq || !cq.data) continue;
-
-          fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callback_query_id: cq.id })
-          }).catch(() => {});
-
-          if (cq.data === 'cancel') {
-            await cancelPicker(client, channelEntity);
-          } else if (cq.data === 'bot_next') {
-            await navigateBotPicker(client, channelEntity, '➡️');
-          } else if (cq.data === 'bot_prev') {
-            await navigateBotPicker(client, channelEntity, '⬅️');
-          } else {
-            const opt = parseInt(cq.data, 10);
-            if (!isNaN(opt)) {
-              await handlePickerChoice(client, channelEntity, opt, onTrackForwarded);
-            }
-          }
-        }
-      }
-    } catch (_) {
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-  }
-}
-
 async function startTelegramService() {
   if (isTelegramReady) return;
   try {
@@ -3002,70 +3092,14 @@ async function startTelegramService() {
 
     await cleanupOrphanedDuplicateNotices();
 
-    const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-    if (BOT_TOKEN) {
-      startBotCallbackPoller(BOT_TOKEN);
-    }
-
-    // Set up real-time listener for /s commands, picker choices, audio uploads, and auto-purge cleaner
+    // Set up real-time listener for audio uploads, /keep flag, and auto-purge cleaner
     client.addEventHandler(async (event) => {
       try {
         const message = event.message;
         if (!message) return;
 
         const isMusicChannel = channelEntity && message.peerId && (utils.getPeerId(message.peerId).toString() === utils.getPeerId(channelEntity).toString());
-        const isSelfChat = message.isPrivate; // e.g. Saved Messages
         const trimmedText = (message.text || message.message || '').trim();
-
-        // Handle /s and /song search commands
-        if (/^[#/](?:song|s)(?:\s+.*)?$/i.test(trimmedText)) {
-          if (isMusicChannel || isSelfChat) {
-            console.log(`[Song Command] Detected: "${trimmedText}" (msg ID: ${message.id})`);
-            handleSongCommand(client, channelEntity, trimmedText, message.id, onTrackForwarded).catch((err) => {
-              console.error('[Song Command Error]:', err.message);
-            });
-            return;
-          }
-        }
-
-        // Handle picker selection
-        const pickerMatch = trimmedText.match(/^\/(\d+)$/);
-        if (pickerMatch && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            const choice = parseInt(pickerMatch[1], 10);
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            handlePickerChoice(client, channelEntity, choice, onTrackForwarded).catch((err) => {
-              console.error('[Picker Choice Error]:', err.message);
-            });
-            return;
-          }
-        }
-
-        // Handle picker pagination
-        if ((trimmedText === '/next' || trimmedText === '/more' || trimmedText === '➡️') && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            navigateBotPicker(client, channelEntity, '➡️').catch(() => {});
-            return;
-          }
-        }
-
-        if ((trimmedText === '/prev' || trimmedText === '⬅️') && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            navigateBotPicker(client, channelEntity, '⬅️').catch(() => {});
-            return;
-          }
-        }
-
-        // Handle picker cancellation
-        if (trimmedText === '/cancel' && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            cancelPicker(client, channelEntity).catch(() => {});
-            return;
-          }
-        }
 
         // Handle /keep command
         if (/^[#/](?:keep|ig)(?:\s+.*)?$/i.test(trimmedText)) {
@@ -3105,13 +3139,17 @@ async function startTelegramService() {
                 if (confirmMsg) {
                   setTimeout(() => {
                     deleteMessageViaBot(confirmMsg.id).catch(() => {});
-                    client.deleteMessages(channelEntity, [confirmMsg.id, message.id], { revoke: true }).catch(() => {});
+                    client.deleteMessages(channelEntity, [confirmMsg.id, message.id], { revoke: true }).catch(() => {
+                      deleteMessageViaBot(message.id).catch(() => {});
+                    });
                   }, 12000);
                 }
               }
             } else {
               setTimeout(() => {
-                client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
+                client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {
+                  deleteMessageViaBot(message.id).catch(() => {});
+                });
               }, 4000);
             }
             return;
@@ -3145,11 +3183,12 @@ async function startTelegramService() {
           const hasButtons = Boolean(message.replyMarkup);
           const isBotSender = await isFromBot(message);
           const isSystemText = SYSTEM_PREFIXES.some(p => trimmedText.startsWith(p));
-          const isPicker = isPickerMenu(channelEntity, message.id);
 
-          if (!isCommand && !hasButtons && !isBotSender && !isSystemText && !isPicker) {
+          if (!isCommand && !hasButtons && !isBotSender && !isSystemText) {
             console.log(`[Channel Cleaner] Auto-purging user non-music message (msg ID: ${message.id}): "${trimmedText.slice(0, 30)}"`);
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
+            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {
+              deleteMessageViaBot(message.id).catch(() => {});
+            });
           }
         }
       } catch (err) {
@@ -3217,15 +3256,9 @@ function tryOpenBrowser(url) {
 }
 
 function printUrlBanner(label, urlStr) {
-  const cyan = '\x1b[1;36m';
-  const green = '\x1b[1;32m';
-  const reset = '\x1b[0m';
-  const bold = '\x1b[1m';
-
-  console.log(`\n${cyan}================================================================================${reset}`);
-  console.log(`  ${bold}${label}:${reset}`);
-  console.log(`  ${green}${urlStr}${reset}`);
-  console.log(`${cyan}================================================================================\n`);
+  console.log('');
+  console.log(`  ${label}:`);
+  console.log(`  ${urlStr}`);
 }
 
 (async () => {
@@ -3235,27 +3268,22 @@ function printUrlBanner(label, urlStr) {
       const secretPath = secretAtStart ? `/${secretAtStart}` : '';
       const localManifest = `http://localhost:${PORT}${secretPath}/manifest.json`;
 
-      const cyan = '\x1b[1;36m';
-      const green = '\x1b[1;32m';
-      const yellow = '\x1b[1;33m';
-      const reset = '\x1b[0m';
-      const bold = '\x1b[1m';
-
-      console.log(`\n${cyan}================================================================================${reset}`);
-      console.log(`  ${bold}Telegram Music Addon server running on:${reset} ${green}http://0.0.0.0:${PORT}${reset}`);
-      console.log(`  ${bold}Local Manifest URL:${reset} ${green}${localManifest}${reset}`);
+      console.log('');
+      console.log(`  Telegram Music Addon server running on: http://0.0.0.0:${PORT}`);
+      console.log(`  Setup Wizard: http://localhost:${PORT}/setup`);
+      console.log(`  Local Manifest URL: ${localManifest}`);
       if (secretAtStart) {
-        console.log(`  ${yellow}[Security] URL_SECRET protection active: unauthorized public requests will be blocked.${reset}`);
+        console.log(`  [Security] URL_SECRET protection active: unauthorized public requests will be blocked.`);
       }
-      console.log(`${cyan}================================================================================\n`);
+      console.log('');
 
-      const enableTunnel = process.env.ENABLE_CLOUDFLARE_TUNNEL === 'true';
+      const enableTunnel = process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false';
       if (enableTunnel) {
         tunnel.startTunnel(PORT).then(url => {
           const secret = getUrlSecret();
           const sPath = secret ? `/${secret}` : '';
           console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
-          printUrlBanner('Telegram Music Addon URL (HTTPS for phone)', `${url}${sPath}/manifest.json`);
+          printUrlBanner('BitChord Addon URL (HTTPS for phone)', `${url}${sPath}/manifest.json`);
         }).catch(err => {
           console.warn('[Cloudflare Tunnel Warning]:', err.message);
         });
@@ -3293,7 +3321,7 @@ function printUrlBanner(label, urlStr) {
           });
           client.setLogLevel('none');
         }
-        if (updates.ENABLE_CLOUDFLARE_TUNNEL === 'true') {
+        if (updates.ENABLE_CLOUDFLARE_TUNNEL !== 'false') {
           tunnel.startTunnel(parseInt(updates.PORT || PORT, 10)).then(url => {
             const secret = getUrlSecret();
             const secretPath = secret ? `/${secret}` : '';
@@ -3314,9 +3342,24 @@ function printUrlBanner(label, urlStr) {
         isTelegramReady = false;
         isStartupComplete = false;
         hasInsertedStartupGap = false;
+
+        if (process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false') {
+          console.log('[Restart] Refreshing Cloudflare HTTPS tunnel...');
+          tunnel.stopTunnel();
+          try {
+            const url = await tunnel.startTunnel(parseInt(process.env.PORT || PORT, 10));
+            const secret = getUrlSecret();
+            const secretPath = secret ? `/${secret}` : '';
+            console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+            printUrlBanner('BitChord Addon URL (HTTPS for phone)', `${url}${secretPath}/manifest.json`);
+          } catch (tErr) {
+            console.warn('[Cloudflare Tunnel Warning]:', tErr.message);
+          }
+        }
+
         await startTelegramService();
         console.log(`[Restart] Service restart complete. ${trackIndex.length} track(s) ready.\n`);
-        return { tracksCount: trackIndex.length };
+        return { tracksCount: trackIndex.length, tunnelUrl: tunnel.getTunnelUrl() };
       });
     });
   } catch (err) {
