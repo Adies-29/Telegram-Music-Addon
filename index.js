@@ -411,9 +411,28 @@ function getAudioAttr(msg) {
 }
 
 function getBaseUrl(req) {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host'] || req.get('host') || `localhost:${PORT}`;
   const prefix = req.secretPrefix ? `/${req.secretPrefix}` : '';
+  const configuredPublic = (process.env.PUBLIC_URL || process.env.CUSTOM_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  if (configuredPublic) {
+    return `${configuredPublic}${prefix}`;
+  }
+
+  const tunnelUrl = typeof tunnel !== 'undefined' && tunnel && typeof tunnel.getTunnelUrl === 'function' ? tunnel.getTunnelUrl() : null;
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const reqHost = req.get('host') || `localhost:${PORT}`;
+  const host = forwardedHost || reqHost;
+  const isLocalHost = host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('0.0.0.0');
+
+  if (!isLocalHost) {
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    return `${proto}://${host}${prefix}`;
+  }
+
+  if (tunnelUrl) {
+    return `${tunnelUrl.replace(/\/+$/, '')}${prefix}`;
+  }
+
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   return `${proto}://${host}${prefix}`;
 }
 

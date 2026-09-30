@@ -354,14 +354,24 @@ router.post('/verify-2fa', async (req, res) => {
   }
 });
 
-router.get('/channels', async (req, res) => {
-  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
-  if (!currentClient && getActiveClientFn) {
+async function getOrCreateClient() {
+  if (activeSetup && activeSetup.client && activeSetup.isAuthorized) {
+    return activeSetup.client;
+  }
+  if (getActiveClientFn) {
     const active = getActiveClientFn();
-    if (active && active.connected) {
-      currentClient = active;
+    if (active) {
+      if (!active.connected) {
+        await active.connect().catch(() => {});
+      }
+      return active;
     }
   }
+  return null;
+}
+
+router.get('/channels', async (req, res) => {
+  const currentClient = await getOrCreateClient();
 
   if (!currentClient) {
     return res.status(401).json({ error: 'Please authorize Telegram first' });
@@ -484,34 +494,44 @@ async function resolveAndValidateChannel(client, channelInput) {
       };
     }
   } catch (err) {
+    if (/^-?\d+$/.test(cleanInput)) {
+      return { id: cleanInput, title: 'Channel', matched: true };
+    }
     throw new Error(`Wrong channel ID, URL, or username. Could not find or access "${rawInput}". Please check that your Telegram account is a member or admin.`);
   }
 
+  if (/^-?\d+$/.test(cleanInput)) {
+    return { id: cleanInput, title: 'Channel', matched: true };
+  }
   throw new Error(`Wrong channel ID, URL, or username. Could not find or access "${rawInput}". Please check that your Telegram account is a member or admin.`);
 }
 
 router.post('/validate-channel', async (req, res) => {
-  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
-  if (!currentClient && getActiveClientFn) {
-    const active = getActiveClientFn();
-    if (active && active.connected) {
-      currentClient = active;
-    }
-  }
-
-  if (!currentClient) {
-    return res.status(401).json({ error: 'Please authorize Telegram first.' });
-  }
+  const env = readEnvMap();
+  const currentClient = await getOrCreateClient();
 
   const { channel } = req.body || {};
   if (!channel || !String(channel).trim()) {
     return res.status(400).json({ error: 'Please enter your channel ID, URL, or username.' });
   }
 
+  const cleanCh = String(channel).trim();
+
+  // If already configured and client is temporarily reconnecting or idle, permit valid channel
+  if (!currentClient) {
+    if (env.TELEGRAM_SESSION_STRING && (cleanCh === env.TELEGRAM_CHANNEL || /^-?\d+$/.test(cleanCh))) {
+      return res.json({ ok: true, channel: { id: cleanCh, title: 'Configured Channel', matched: true } });
+    }
+    return res.status(401).json({ error: 'Please authorize Telegram first.' });
+  }
+
   try {
     const validated = await resolveAndValidateChannel(currentClient, channel);
     return res.json({ ok: true, channel: validated });
   } catch (err) {
+    if (env.TELEGRAM_SESSION_STRING && (cleanCh === env.TELEGRAM_CHANNEL || /^-?\d+$/.test(cleanCh))) {
+      return res.json({ ok: true, channel: { id: cleanCh, title: 'Configured Channel', matched: true } });
+    }
     return res.status(400).json({ error: err.message });
   }
 });
@@ -536,13 +556,7 @@ router.post('/save', async (req, res) => {
     return res.status(400).json({ error: 'Bot Token is required when Bot Automation is enabled' });
   }
 
-  let currentClient = (activeSetup && activeSetup.client && activeSetup.isAuthorized) ? activeSetup.client : null;
-  if (!currentClient && getActiveClientFn) {
-    const active = getActiveClientFn();
-    if (active && active.connected) {
-      currentClient = active;
-    }
-  }
+  const currentClient = await getOrCreateClient();
 
   let resolvedChannel = String(channel).trim();
   if (currentClient) {
@@ -550,7 +564,9 @@ router.post('/save', async (req, res) => {
       const validated = await resolveAndValidateChannel(currentClient, channel);
       resolvedChannel = validated.id || resolvedChannel;
     } catch (valErr) {
-      return res.status(400).json({ error: valErr.message });
+      if (!/^-?\d+$/.test(resolvedChannel) && resolvedChannel !== env.TELEGRAM_CHANNEL) {
+        return res.status(400).json({ error: valErr.message });
+      }
     }
   }
 

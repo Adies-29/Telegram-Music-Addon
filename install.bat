@@ -86,8 +86,8 @@ if exist "%CURR_DIR%\package.json" (
     set "TARGET_DIR=%CURR_DIR%\Telegram-Music-Addon"
 )
 
-:: 3. Download or clone project if not already present
-if exist "%TARGET_DIR%\package.json" goto :PKG_OK
+:: 3. Download, clone, or update project
+if exist "%TARGET_DIR%\package.json" goto :UPDATE_EXISTING
 
 echo [INFO] Downloading Telegram Music Addon from GitHub...
 where git >nul 2>nul
@@ -100,6 +100,21 @@ goto :PKG_OK
 
 :USE_PS_DOWNLOAD
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference = 'SilentlyContinue'; $tmpZip = Join-Path $env:TEMP 'Telegram-Music-Addon.zip'; $tmpDir = Join-Path $env:TEMP 'TeleMusicExtract'; New-Item -ItemType Directory -Force -Path '%TARGET_DIR%' | Out-Null; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('https://github.com/Imnotshashwat/Telegram-Music-Addon/archive/refs/heads/main.zip', $tmpZip); Expand-Archive -Path $tmpZip -DestinationPath $tmpDir -Force; Copy-Item -Path ($tmpDir + '\Telegram-Music-Addon-main\*') -Destination '%TARGET_DIR%' -Recurse -Force; Remove-Item -Path $tmpZip, $tmpDir -Recurse -Force"
+goto :PKG_OK
+
+:UPDATE_EXISTING
+cd /d "%TARGET_DIR%"
+if exist ".git" (
+    where git >nul 2>nul
+    if %errorlevel% equ 0 (
+        echo [INFO] Existing installation detected. Checking for updates...
+        git pull --quiet
+        if %errorlevel% equ 0 (
+            echo [OK] Project is up to date with GitHub!
+        )
+        echo.
+    )
+)
 
 :PKG_OK
 if not exist "%TARGET_DIR%\package.json" (
