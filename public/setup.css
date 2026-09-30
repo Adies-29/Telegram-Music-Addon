@@ -73,24 +73,54 @@ body {
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 14px;
 }
 
 .brand-icon {
-  width: 36px;
-  height: 36px;
-  border-radius: var(--radius-sm);
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-md);
+  object-fit: contain;
 }
 
 .brand-title {
-  font-size: 1.25rem;
+  font-size: 1.35rem;
   font-weight: 700;
   letter-spacing: -0.02em;
+  line-height: 1.2;
 }
 
 .brand-subtitle {
-  font-size: 0.8125rem;
+  font-size: 0.875rem;
   color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.github-link {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  transition: all var(--transition-normal);
+  text-decoration: none;
+}
+
+.github-link:hover {
+  background: var(--bg-hover);
+  color: var(--text-main);
+  border-color: var(--border-strong);
+  transform: translateY(-1px);
+}
+
+.github-icon {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
 }
 
 .wizard-card {
@@ -864,25 +894,27 @@ select:disabled {
   text-align: center;
 }
 
-.qr-canvas {
+.qr-canvas,
+.qr-container {
   width: 180px;
   height: 180px;
   padding: 12px;
   background: #ffffff;
-  border: 2px solid #0088cc;
-  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 20px rgba(0, 136, 204, 0.55), inset 0 0 4px rgba(0, 136, 204, 0.2);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35), 0 0 24px rgba(56, 189, 248, 0.15);
   transition: transform var(--transition-fast), box-shadow var(--transition-fast);
   position: relative;
   overflow: hidden;
 }
 
-.qr-canvas:hover {
+.qr-canvas:hover,
+.qr-container:hover {
   transform: scale(1.02);
-  box-shadow: 0 0 25px rgba(0, 136, 204, 0.75), inset 0 0 6px rgba(0, 136, 204, 0.3);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4), 0 0 28px rgba(56, 189, 248, 0.22);
 }
 
 .qr-canvas svg {
@@ -1024,8 +1056,17 @@ select:disabled {
     gap: 10px;
   }
 
+  .brand-icon {
+    width: 40px;
+    height: 40px;
+  }
+
   .brand-title {
-    font-size: 1.0625rem;
+    font-size: 1.18rem;
+  }
+
+  .brand-subtitle {
+    font-size: 0.8125rem;
   }
 
   .steps-progress {

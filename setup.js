@@ -1,5 +1,6 @@
 require('dotenv').config();
 const readline = require('readline');
+const crypto = require('crypto');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
@@ -182,7 +183,7 @@ function askQuestion(rl, query, hideInput = false) {
     }
 
     console.log('\n4. Bot Automation & Options');
-    const botAns = await askQuestion(rl, 'Enable @losslessfinderbot automation for lossless search & sync? (Y/n): ');
+    const botAns = await askQuestion(rl, 'Enable bot automation for lossless search & sync? (Y/n): ');
     const enableBotSync = !botAns || botAns.toLowerCase().startsWith('y');
 
     const defaultPort = env.PORT || '3000';
@@ -190,8 +191,9 @@ function askQuestion(rl, query, hideInput = false) {
     const port = portAns || defaultPort;
 
     const existingSecret = env.URL_SECRET || '';
-    const secretAns = await askQuestion(rl, `URL Secret protection (press Enter for none, or type secret) [current: ${existingSecret || 'none'}]: `);
-    const urlSecret = secretAns !== '' ? secretAns : existingSecret;
+    const defaultSecret = existingSecret || crypto.randomBytes(4).toString('hex');
+    const secretAns = await askQuestion(rl, `URL Secret protection [default: ${defaultSecret}]: `);
+    const urlSecret = secretAns !== '' ? secretAns : defaultSecret;
 
     const tunnelAns = await askQuestion(rl, 'Enable Cloudflare HTTPS Tunnel for mobile BitChord? (Y/n): ');
     const enableTunnel = !tunnelAns || tunnelAns.toLowerCase().startsWith('y');
@@ -204,10 +206,8 @@ function askQuestion(rl, query, hideInput = false) {
       PORT: port,
       ENABLE_BOT_SYNC: enableBotSync ? 'true' : 'false',
       ENABLE_CLOUDFLARE_TUNNEL: enableTunnel ? 'true' : 'false',
+      URL_SECRET: urlSecret,
     };
-    if (urlSecret) {
-      updates.URL_SECRET = urlSecret;
-    }
 
     let tunnelUrl = '';
     if (enableTunnel) {

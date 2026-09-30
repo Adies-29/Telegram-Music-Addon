@@ -600,52 +600,52 @@
       btnStep3Next.innerHTML = '<span>Checking channel...</span>';
     }
 
-    // Compute safe port with default 3000 fallback clamped between 1024 and 65535
-    let safePort = 3000;
-    if (serverPort && serverPort.value.trim()) {
-      const parsed = parseInt(serverPort.value.trim(), 10);
-      if (!isNaN(parsed) && parsed >= 1024 && parsed <= 65535) {
-        safePort = parsed;
-      }
-    }
-    if (serverPort) {
-      serverPort.value = safePort;
-    }
-
-    // Validate channel with Telegram MTProto before saving
     try {
-      const valRes = await fetch('/api/setup/validate-channel', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ channel: channelVal }),
-      });
-      const contentType = valRes.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
-        // If server returned non-JSON (e.g. 404 or restarting), bypass pre-validation check and proceed to /save
-        console.warn('Channel pre-validation endpoint returned non-JSON, deferring to save handler.');
-      } else {
-        const valData = await valRes.json();
-        if (!valRes.ok || !valData.ok) {
-          showError(valData.error || 'Wrong channel ID, URL, or username. Please check that your Telegram account is a member or admin.');
-          if (channelInput) channelInput.focus();
-          return false;
-        }
-        if (valData.channel && valData.channel.id) {
-          channelVal = valData.channel.id;
+      // Compute safe port with default 3000 fallback clamped between 1024 and 65535
+      let safePort = 3000;
+      if (serverPort && serverPort.value.trim()) {
+        const parsed = parseInt(serverPort.value.trim(), 10);
+        if (!isNaN(parsed) && parsed >= 1024 && parsed <= 65535) {
+          safePort = parsed;
         }
       }
-    } catch (valErr) {
-      console.warn('Channel pre-validation error, attempting save:', valErr);
-    }
+      if (serverPort) {
+        serverPort.value = safePort;
+      }
 
-    if (btnStep3Next && navigateAfter) {
-      btnStep3Next.innerHTML = '<span>Saving...</span>';
-    }
+      // Validate channel with Telegram MTProto before saving
+      try {
+        const valRes = await fetch('/api/setup/validate-channel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ channel: channelVal }),
+        });
+        const contentType = valRes.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          // If server returned non-JSON (e.g. 404 or restarting), bypass pre-validation check and proceed to /save
+          console.warn('Channel pre-validation endpoint returned non-JSON, deferring to save handler.');
+        } else {
+          const valData = await valRes.json();
+          if (!valRes.ok || !valData.ok) {
+            showError(valData.error || 'Wrong channel ID, URL, or username. Please check that your Telegram account is a member or admin.');
+            if (channelInput) channelInput.focus();
+            return false;
+          }
+          if (valData.channel && valData.channel.id) {
+            channelVal = valData.channel.id;
+          }
+        }
+      } catch (valErr) {
+        console.warn('Channel pre-validation error, attempting save:', valErr);
+      }
 
-    const teledriveEl = document.getElementById('teledriveChannel');
-    const teledriveVal = teledriveEl ? teledriveEl.value.trim() : (serverConfigData?.teledriveChannel || '');
+      if (btnStep3Next && navigateAfter) {
+        btnStep3Next.innerHTML = '<span>Saving...</span>';
+      }
 
-    try {
+      const teledriveEl = document.getElementById('teledriveChannel');
+      const teledriveVal = teledriveEl ? teledriveEl.value.trim() : (serverConfigData?.teledriveChannel || '');
+
       const res = await fetch('/api/setup/save', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -674,7 +674,7 @@
         enableBotSync: enableBotSync ? enableBotSync.checked : false,
         botToken: botToken ? botToken.value.trim() : '',
         enableTunnel: enableTunnel ? enableTunnel.checked : false,
-        urlSecret: urlSecret ? urlSecret.value.trim() : '',
+        urlSecret: (data.config && data.config.urlSecret) || (urlSecret ? urlSecret.value.trim() : ''),
         customPublicUrl: customPublicUrl ? customPublicUrl.value.trim() : '',
         port: safePort,
       };
@@ -736,6 +736,8 @@
         if (!res.ok || !data.ok) {
           throw new Error(data.error || 'Restart failed');
         }
+
+        await checkInitialStatus();
 
         btnRestartServer.innerHTML = '<span>✓ Restarted</span>';
         if (data && typeof data.tracksCount === 'number') {
@@ -1089,6 +1091,10 @@
             input.value = '';
           }
         });
+        if (data.urlSecret) {
+          const secretEl = document.getElementById('urlSecret');
+          if (secretEl) secretEl.value = data.urlSecret;
+        }
         setStep(1);
         setConfigurationLock(false);
       }
