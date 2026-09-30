@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { TelegramClient } = require('telegram');
@@ -9,6 +10,57 @@ const tunnel = require('./tunnel');
 
 const router = express.Router();
 const envPath = path.join(__dirname, '.env');
+
+let suggestedSecret = null;
+function getSuggestedSecret() {
+  if (!suggestedSecret) {
+    suggestedSecret = crypto.randomBytes(4).toString('hex');
+  }
+  return suggestedSecret;
+}
+
+const { execSync } = require('child_process');
+function detectTailscaleFqdn() {
+  try {
+    const out = execSync('tailscale status --json', { stdio: ['pipe', 'pipe', 'ignore'], timeout: 1500 });
+    const data = JSON.parse(out.toString());
+    let dnsName = data?.Self?.DNSName;
+    if (dnsName) {
+      dnsName = dnsName.replace(/\.+$/, '');
+      return {
+        fqdn: `https://${dnsName}`,
+        hostname: (data?.Self?.HostName || '').toLowerCase(),
+        suffix: data?.MagicDNSSuffix || '',
+      };
+    }
+  } catch (_) {}
+  return null;
+}
+
+function normalizePublicUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return '';
+  let url = rawUrl.trim().replace(/\/+$/, '');
+  if (!url) return '';
+
+  if (!/^https?:\/\//i.test(url)) {
+    url = `https://${url}`;
+  }
+
+  if (url.includes('.ts.net')) {
+    const ts = detectTailscaleFqdn();
+    if (ts) {
+      try {
+        const parsed = new URL(url);
+        if (ts.suffix && parsed.hostname === ts.suffix) {
+          parsed.hostname = `${ts.hostname}.${ts.suffix}`;
+          url = parsed.toString().replace(/\/+$/, '');
+        }
+      } catch (_) {}
+    }
+  }
+
+  return url;
+}
 
 let activeSetup = null;
 let setupTimeout = null;
@@ -123,6 +175,7 @@ function clearActiveSetup() {
 router.get('/status', (req, res) => {
   const env = readEnvMap();
   const configured = Boolean(env.TELEGRAM_API_ID && env.TELEGRAM_API_HASH && env.TELEGRAM_SESSION_STRING && env.TELEGRAM_CHANNEL);
+  const activeSecret = env.URL_SECRET || env.ACCESS_TOKEN;
   res.json({
     configured,
     tracksCount: getLibraryTracksCount(),
@@ -134,8 +187,8 @@ router.get('/status', (req, res) => {
     port: parseInt(env.PORT || '3000', 10),
     enableBotSync: env.ENABLE_BOT_SYNC === 'true',
     botToken: env.TELEGRAM_BOT_TOKEN || null,
-    hasSecret: Boolean(env.URL_SECRET || env.ACCESS_TOKEN),
-    urlSecret: env.URL_SECRET || null,
+    hasSecret: Boolean(activeSecret),
+    urlSecret: activeSecret || getSuggestedSecret(),
     customPublicUrl: env.PUBLIC_URL || null,
     enableTunnel: env.ENABLE_CLOUDFLARE_TUNNEL !== 'false',
     tunnelActive: Boolean(tunnel.getTunnelUrl()),
@@ -526,9 +579,9 @@ router.post('/save', async (req, res) => {
         updates.TELEDRIVE_CHANNEL = '';
       }
     }
-    if (urlSecret !== undefined) {
-      updates.URL_SECRET = String(urlSecret).trim();
-    }
+    const trimmedSecret = urlSecret !== undefined ? String(urlSecret).trim() : '';
+    updates.URL_SECRET = trimmedSecret || getSuggestedSecret();
+    suggestedSecret = null;
     let parsedPort = 3000;
     if (port !== undefined && String(port).trim() !== '') {
       const p = parseInt(port, 10);
@@ -594,6 +647,7 @@ router.post('/save', async (req, res) => {
         hasSecret: Boolean(updates.URL_SECRET),
         port: updates.PORT || '3000',
         hasTunnel: Boolean(enableTunnel),
+        urlSecret: updates.URL_SECRET || null,
       },
     });
   } catch (err) {
