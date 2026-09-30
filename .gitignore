@@ -18,4 +18,7 @@ notification_state.json
 tracks_cache.json*
 *.bak
 teledrive_state.json
+teledrive.js
 CHANGES.md
+*.zip
+
