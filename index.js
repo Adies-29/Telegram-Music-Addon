@@ -4,24 +4,42 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const pkg = require('./package.json');
 const bigInt = require('big-integer');
 const { TelegramClient, utils } = require('telegram');
+const { Logger } = require('telegram/extensions');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram/tl');
 const { NewMessage } = require('telegram/events');
 const mm = require('music-metadata');
-const {
-  handleSongCommand,
-  hasActivePicker,
-  isPickerMenu,
-  handlePickerChoice,
-  cancelPicker,
-  navigateBotPicker,
-} = require('./downloader');
+const setupApi = require('./setup-api');
+const tunnel = require('./tunnel');
+
+setupApi.setGetActiveClient(() => client);
+setupApi.setGetTracksCount(() => trackIndex.length);
 
 const app = express();
 app.set('trust proxy', true);
+app.use(express.json());
+app.use('/public', express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+app.use('/api/setup', setupApi.router);
+app.get('/setup', (req, res) => res.sendFile(path.join(__dirname, 'public', 'setup.html')));
+
+// WebDAV protocol discovery: intercept OPTIONS /dav before CORS ends with 204
+app.use((req, res, next) => {
+  if (req.method === 'OPTIONS' && (req.path.includes('/dav') || req.url.includes('/dav'))) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS, PROPFIND');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('DAV', '1, 2');
+    res.setHeader('MS-Author-Via', 'DAV');
+    res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+    return res.status(200).end();
+  }
+  next();
+});
+
 app.use(cors());
 
 function cleanEnv(val) {
@@ -46,8 +64,13 @@ try {
   // Optional local module
 }
 const PORT = process.env.PORT || 3000;
-const URL_SECRET = cleanEnv(process.env.URL_SECRET || process.env.ACCESS_TOKEN);
+function getUrlSecret() {
+  return cleanEnv(process.env.URL_SECRET || process.env.ACCESS_TOKEN);
+}
 const CACHE_FILE = path.join(__dirname, 'tracks_cache.json');
+const CACHE_FILE_GZ = path.join(__dirname, 'tracks_cache.json.gz');
+const CACHE_FILE_BAK = path.join(__dirname, 'tracks_cache.json.gz.bak');
+const CACHE_FILE_TMP = path.join(__dirname, 'tracks_cache.json.gz.tmp');
 
 // GramJS StringSession requires the session string to begin with the version character "1"
 if (SESSION_STRING && SESSION_STRING[0] !== '1') {
@@ -55,17 +78,6 @@ if (SESSION_STRING && SESSION_STRING[0] !== '1') {
   if (oneIdx !== -1) {
     SESSION_STRING = SESSION_STRING.slice(oneIdx);
   }
-}
-
-if (!API_ID || !API_HASH || !SESSION_STRING || !CHANNEL) {
-  console.error('----------------------------------------------------------------');
-  console.error('ERROR: Missing required environment variable in .env:');
-  if (!API_ID) console.error('  - TELEGRAM_API_ID is missing');
-  if (!API_HASH) console.error('  - TELEGRAM_API_HASH is missing');
-  if (!SESSION_STRING) console.error('  - TELEGRAM_SESSION_STRING is missing (run "npm run login" first)');
-  if (!CHANNEL) console.error('  - TELEGRAM_CHANNEL is missing (set your channel @name or ID)');
-  console.error('----------------------------------------------------------------');
-  process.exit(1);
 }
 
 const AUDIO_EXTENSIONS = ['flac', 'mp3', 'm4a', 'aac', 'wav', 'ogg', 'opus', 'alac', 'ec3', 'eac3'];
@@ -105,19 +117,19 @@ function isAudioDocument(doc) {
 
 // Known composer duos that are hyphenated in tags but separated on streaming services
 const COMPOSER_DUOS = [
-  [/vishal[-\s–—]+shekhar/gi, 'Vishal & Shekhar'],
-  [/sachin[-\s–—]+jigar/gi, 'Sachin & Jigar'],
-  [/salim[-\s–—]+sulaiman/gi, 'Salim & Sulaiman'],
-  [/shankar[-\s–—]+ehsaan[-\s–—]+loy/gi, 'Shankar & Ehsaan & Loy'],
-  [/ajay[-\s–—]+atul/gi, 'Ajay & Atul'],
-  [/sajid[-\s–—]+wajid/gi, 'Sajid & Wajid'],
-  [/nadeem[-\s–—]+shravan/gi, 'Nadeem & Shravan'],
-  [/jatin[-\s–—]+lalit/gi, 'Jatin & Lalit'],
-  [/anand[-\s–—]+milind/gi, 'Anand & Milind'],
-  [/laxmikant[-\s–—]+pyarelal/gi, 'Laxmikant & Pyarelal'],
-  [/kalyanji[-\s–—]+anandji/gi, 'Kalyanji & Anandji'],
-  [/shiv[-\s–—]+hari/gi, 'Shiv & Hari'],
-  [/raam[-\s–—]+laxman/gi, 'Raam & Laxman'],
+  [/vishal[-\s\u2013\u2014]+shekhar/gi, 'Vishal & Shekhar'],
+  [/sachin[-\s\u2013\u2014]+jigar/gi, 'Sachin & Jigar'],
+  [/salim[-\s\u2013\u2014]+sulaiman/gi, 'Salim & Sulaiman'],
+  [/shankar[-\s\u2013\u2014]+ehsaan[-\s\u2013\u2014]+loy/gi, 'Shankar & Ehsaan & Loy'],
+  [/ajay[-\s\u2013\u2014]+atul/gi, 'Ajay & Atul'],
+  [/sajid[-\s\u2013\u2014]+wajid/gi, 'Sajid & Wajid'],
+  [/nadeem[-\s\u2013\u2014]+shravan/gi, 'Nadeem & Shravan'],
+  [/jatin[-\s\u2013\u2014]+lalit/gi, 'Jatin & Lalit'],
+  [/anand[-\s\u2013\u2014]+milind/gi, 'Anand & Milind'],
+  [/laxmikant[-\s\u2013\u2014]+pyarelal/gi, 'Laxmikant & Pyarelal'],
+  [/kalyanji[-\s\u2013\u2014]+anandji/gi, 'Kalyanji & Anandji'],
+  [/shiv[-\s\u2013\u2014]+hari/gi, 'Shiv & Hari'],
+  [/raam[-\s\u2013\u2014]+laxman/gi, 'Raam & Laxman'],
 ];
 
 function formatArtistForClient(artistStr) {
@@ -126,17 +138,23 @@ function formatArtistForClient(artistStr) {
   for (const [pattern, replacement] of COMPOSER_DUOS) {
     formatted = formatted.replace(pattern, replacement);
   }
-  formatted = formatted.replace(/\s+[-–—]+\s+/g, ', ');
+  formatted = formatted.replace(/\s+[-\u2013\u2014]+\s+/g, ', ');
   return formatted.trim();
 }
 
-const client = new TelegramClient(new StringSession(SESSION_STRING), API_ID, API_HASH, {
-  connectionRetries: 5,
-  autoReconnect: true,
-});
-client.setLogLevel('error');
+let client = null;
+if (API_ID && API_HASH) {
+  client = new TelegramClient(new StringSession(SESSION_STRING || ''), API_ID, API_HASH, {
+    connectionRetries: 10,
+    autoReconnect: true,
+    useWSS: process.env.USE_WSS !== 'false',
+    baseLogger: new Logger('none'),
+  });
+  client.setLogLevel('none');
+}
 
 let channelEntity = null;
+let isTelegramReady = false;
 let trackIndex = [];
 let lastIndexed = 0;
 
@@ -189,8 +207,11 @@ function updateMediaCacheCapacity() {
     mediaCache.maxSize = dynamicCap;
   }
 }
-const fastStartCache = new SimpleLRU(10);
-const FAST_START_BYTES = 512 * 1024;
+const fastStartCache = new SimpleLRU(6);
+const FAST_START_BYTES = 6 * 1024 * 1024; // Exactly 12 blocks of 512KB (6.0 MB)
+
+// LRU cache for audio headers and tag slices (128KB - 256KB, up to 150 tracks)
+const tagSliceCache = new SimpleLRU(150);
 
 const recentRequests = [];
 function recordRequest(entry) {
@@ -200,12 +221,97 @@ function recordRequest(entry) {
 
 let currentlyPlayingTrackId = null;
 let lastPlaybackLogTime = 0;
+let lastSeekLogTime = 0;
+let lastSeekStart = 0;
+let lastServedAudioTrackId = null;
+let lastLogWasBlank = false;
+
+const origStderrWrite = process.stderr.write;
+process.stderr.write = function (chunk, ...args) {
+  const str = chunk ? chunk.toString() : '';
+  if (str.includes('TimeoutNegativeWarning') || str.includes('Timeout duration was set to 1') || str.includes('localstorage-file')) return true;
+  return origStderrWrite.apply(process.stderr, [chunk, ...args]);
+};
+
+const BOLD   = '\x1b[1m';
+const DIM    = '\x1b[2m';
+const ITALIC = '\x1b[3m';
+const RESET  = '\x1b[0m';
+
+let isStartupComplete = false;
+let hasInsertedStartupGap = false;
+
+function printCliSeparator() {}
+
+function centerText(text, width = 10) {
+  const len = text.length;
+  if (len >= width) return text;
+  const leftPadding = Math.floor((width - len) / 2);
+  const rightPadding = width - len - leftPadding;
+  return ' '.repeat(leftPadding) + text + ' '.repeat(rightPadding);
+}
+
+function getCliTag(tag) {
+  const centeredTag = centerText(tag.toUpperCase(), 10);
+  return `${DIM}|${RESET}${BOLD}${centeredTag}${RESET}${DIM}|${RESET}`;
+}
+
+function logCli(tag, msg) {
+  const upperTag = tag.toUpperCase();
+  if (isStartupComplete && !hasInsertedStartupGap && ['SEARCH', 'STREAM', 'PRECACHE', 'BUFFER', 'SEEK', 'PROBE', 'WEBDAV'].includes(upperTag)) {
+    hasInsertedStartupGap = true;
+    console.log('');
+  }
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const timeStr = `${DIM}${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}${RESET}`;
+  console.log(`${timeStr} ${getCliTag(tag)} ${msg}`);
+  if (upperTag === 'LIBRARY') {
+    hasInsertedStartupGap = false;
+  }
+  lastLogWasBlank = false;
+}
+
+if (teledrive && typeof teledrive.setLogCli === 'function') {
+  teledrive.setLogCli(logCli);
+}
 
 function loadCache() {
   try {
-    if (fs.existsSync(CACHE_FILE)) {
-      const data = fs.readFileSync(CACHE_FILE, 'utf-8');
-      const rawTracks = JSON.parse(data);
+    let rawData = null;
+    let source = '';
+
+    if (fs.existsSync(CACHE_FILE_GZ)) {
+      try {
+        const buffer = fs.readFileSync(CACHE_FILE_GZ);
+        rawData = zlib.gunzipSync(buffer).toString('utf-8');
+        source = 'primary compressed cache';
+      } catch (err) {
+        console.warn('Primary compressed cache unreadable, attempting backup...');
+      }
+    }
+
+    if (!rawData && fs.existsSync(CACHE_FILE_BAK)) {
+      try {
+        const buffer = fs.readFileSync(CACHE_FILE_BAK);
+        rawData = zlib.gunzipSync(buffer).toString('utf-8');
+        source = 'backup compressed cache';
+      } catch (err) {
+        console.warn('Backup compressed cache unreadable...');
+      }
+    }
+
+    if (!rawData && fs.existsSync(CACHE_FILE)) {
+      try {
+        rawData = fs.readFileSync(CACHE_FILE, 'utf-8');
+        source = 'legacy json cache';
+      } catch (err) {
+        console.warn('Legacy JSON cache unreadable...');
+      }
+    }
+
+    if (rawData) {
+      const rawTracks = JSON.parse(rawData);
       const seenIds = new Set();
       trackIndex = [];
       for (const t of rawTracks) {
@@ -219,20 +325,37 @@ function loadCache() {
           t.audioModes = ['DOLBY_ATMOS'];
           t.audioMode = 'DOLBY_ATMOS';
         }
+        indexTrackKeywords(t);
         trackIndex.push(t);
       }
-      console.log(`Loaded ${trackIndex.length} track(s) from cache.`);
+      logCli('CACHE', `Loaded ${BOLD}${trackIndex.length}${RESET} tracks from ${source}`);
       updateMediaCacheCapacity();
+      rebuildWebDavFileMap();
+
+      // Auto-migrate legacy JSON to atomic Gzip if GZ missing
+      if (!fs.existsSync(CACHE_FILE_GZ)) {
+        saveCache();
+      }
     }
   } catch (err) {
     console.warn(`Could not load cache: ${err.message}`);
   }
 }
 
-// Helper: save cached tracks to disk
+// Helper: save cached tracks to disk using Atomic Gzip write
 function saveCache() {
   try {
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(trackIndex, null, 2), 'utf-8');
+    const jsonString = JSON.stringify(trackIndex);
+    const compressed = zlib.gzipSync(Buffer.from(jsonString));
+
+    if (fs.existsSync(CACHE_FILE_GZ)) {
+      try {
+        fs.copyFileSync(CACHE_FILE_GZ, CACHE_FILE_BAK);
+      } catch (_) {}
+    }
+
+    fs.writeFileSync(CACHE_FILE_TMP, compressed);
+    fs.renameSync(CACHE_FILE_TMP, CACHE_FILE_GZ);
   } catch (err) {
     console.warn(`Could not save cache: ${err.message}`);
   }
@@ -288,9 +411,28 @@ function getAudioAttr(msg) {
 }
 
 function getBaseUrl(req) {
-  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
-  const host = req.headers['x-forwarded-host'] || req.get('host') || `localhost:${PORT}`;
   const prefix = req.secretPrefix ? `/${req.secretPrefix}` : '';
+  const configuredPublic = (process.env.PUBLIC_URL || process.env.CUSTOM_PUBLIC_URL || '').trim().replace(/\/+$/, '');
+  if (configuredPublic) {
+    return `${configuredPublic}${prefix}`;
+  }
+
+  const tunnelUrl = typeof tunnel !== 'undefined' && tunnel && typeof tunnel.getTunnelUrl === 'function' ? tunnel.getTunnelUrl() : null;
+  const forwardedHost = req.headers['x-forwarded-host'];
+  const reqHost = req.get('host') || `localhost:${PORT}`;
+  const host = forwardedHost || reqHost;
+  const isLocalHost = host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('0.0.0.0');
+
+  if (!isLocalHost) {
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    return `${proto}://${host}${prefix}`;
+  }
+
+  if (tunnelUrl) {
+    return `${tunnelUrl.replace(/\/+$/, '')}${prefix}`;
+  }
+
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
   return `${proto}://${host}${prefix}`;
 }
 
@@ -388,27 +530,39 @@ async function prewarmTrackPreamble(trackId, media, title) {
       const iter = client.iterDownload({
         file: targetMedia,
         offset: bigInt(0),
-        requestSize: FAST_START_BYTES,
+        requestSize: 512 * 1024,
       });
       inFlightPrewarmIters.set(idStr, iter);
 
       try {
+        const preambleChunks = [];
+        let bytesCollected = 0;
         for await (const chunk of iter) {
           if (!inFlightPrewarmIters.has(idStr)) {
             iter.left = 0;
             await iter.close().catch(() => {});
             break;
           }
-          const preamble = chunk.slice(0, FAST_START_BYTES);
-          fastStartCache.set(idStr, preamble);
-          const prewarmKb = Math.round(preamble.length / 1024);
-          const trackObj = findTrack(idStr);
-          const trackTitle = trackObj?.title || title || 'track';
-          console.log(`[FastStart] Pre-warmed ${prewarmKb} KB for "${trackTitle}" (ID: ${idStr})`);
-          iter.left = 0;
-          await iter.close().catch(() => {});
-          break;
+          const needed = FAST_START_BYTES - bytesCollected;
+          preambleChunks.push(chunk.slice(0, needed));
+          bytesCollected += Math.min(chunk.length, needed);
+          if (bytesCollected >= FAST_START_BYTES) {
+            break;
+          }
         }
+        if (preambleChunks.length > 0) {
+          const preamble = Buffer.concat(preambleChunks);
+          fastStartCache.set(idStr, preamble);
+          tagSliceCache.set(idStr, preamble.slice(0, Math.min(preamble.length, 256 * 1024)));
+          if (bytesCollected >= FAST_START_BYTES || !iter.left) {
+            const sizeFormatted = preamble.length >= 1024 * 1024
+              ? `${(preamble.length / (1024 * 1024)).toFixed(1)} MB`
+              : `${Math.round(preamble.length / 1024)} KB`;
+            logCli('BUFFER', `Prewarmed ${BOLD}${sizeFormatted}${RESET} -> ID: ${BOLD}${idStr}${RESET}`);
+          }
+        }
+        iter.left = 0;
+        await iter.close().catch(() => {});
         break;
       } catch (err) {
         if (!hasRefreshed && isFileReferenceError(err)) {
@@ -461,6 +615,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
   let sampleRate = undefined;
   let bitDepth = undefined;
   let isrc = undefined;
+  let bitrate = undefined;
 
   const isMp4Container = ext === 'm4a' || ext === 'mp4';
   const shouldSniffTags = (isMp4Container || !audioAttr || !audioAttr.title || !audioAttr.performer || !isrc) && sizeBytes > 0;
@@ -525,6 +680,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
           if (parsed.format.sampleRate) sampleRate = parsed.format.sampleRate;
           if (parsed.format.bitsPerSample) bitDepth = parsed.format.bitsPerSample;
           if (!duration && parsed.format.duration) duration = Math.round(parsed.format.duration);
+          if (parsed.format.bitrate) bitrate = Math.round(parsed.format.bitrate / 1000);
         }
       }
     } catch (_) {}
@@ -563,7 +719,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
     formatName = 'eac3-joc';
     if (!sampleRate) sampleRate = 48000;
     if (!bitDepth) bitDepth = 16;
-  } else if (formatName === 'm4a' && (hasAlacAtom || parsedCodec === 'ALAC' || rawKbps > 500)) {
+  } else if (formatName === 'm4a' && (hasAlacAtom || parsedCodec === 'ALAC' || rawKbps > 500 || bitDepth === 16 || bitDepth === 24)) {
     formatName = 'alac';
     if (!bitDepth) bitDepth = rawKbps > 2000 ? 24 : 16;
     if (!sampleRate) sampleRate = 48000;
@@ -591,6 +747,7 @@ async function parseTrackMessage(msg, cacheMedia = true) {
     format: formatName,
     sampleRate,
     bitDepth,
+    bitrate,
     quality: qualityText,
     isrc,
     hasArtwork,
@@ -616,8 +773,13 @@ function getQualityScore(track) {
   }
 
   let rawKbps = 320;
-  if (track.sizeBytes && track.duration) {
+  if (track.bitrate) {
+    rawKbps = track.bitrate;
+  } else if (track.sizeBytes && track.duration) {
     rawKbps = Math.round((track.sizeBytes * 8) / (track.duration * 1000));
+    // Hard cap fallback calculation to prevent massive artwork from inflating lossy scores
+    if (fmt === 'mp3' && rawKbps > 320) rawKbps = 320;
+    if ((fmt === 'aac' || fmt === 'm4a' || fmt === 'opus') && rawKbps > 500) rawKbps = 500;
   }
 
   let multiplier = 1.0;
@@ -658,7 +820,7 @@ function normalizeTitle(t) {
     .toLowerCase()
     .replace(/\((?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?|radio edit|clean|explicit|atmos|dolby\s*atmos).*?\)/gi, '')
     .replace(/\[(?:from|official|audio|video|lyrics|full song|remastered|hd|hq|club mix|feat\.?|ft\.?|radio edit|clean|explicit|atmos|dolby\s*atmos).*?\]/gi, '')
-    .replace(/\s*[-–—]\s*(?:radio edit|original mix|single|clean|explicit|atmos|dolby\s*atmos|new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|from\s+.*?)$/gi, '')
+    .replace(/\s*[-\u2013\u2014]\s*(?:radio edit|original mix|single|clean|explicit|atmos|dolby\s*atmos|new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|from\s+.*?)$/gi, '')
     .replace(/[^\w\s]/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -666,8 +828,8 @@ function normalizeTitle(t) {
 
 function getCoreTitle(str) {
   if (!str) return '';
-  if (str.includes(' - ') || str.includes(' – ') || str.includes(' — ')) {
-    const parts = str.split(/\s+[-–—]+\s+/);
+  if (str.includes(' - ') || str.includes(' \u2013 ') || str.includes(' \u2014 ')) {
+    const parts = str.split(/\s+[-\u2013\u2014]+\s+/);
     return normalizeTitle(parts[parts.length - 1]);
   }
   return normalizeTitle(str);
@@ -680,6 +842,12 @@ function normalizeArtist(a) {
     .replace(/[^\w\s]/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function extractVersionTag(title) {
+  if (!title) return '';
+  const match = title.match(/[\(\[\{](?:version|remix|acoustic|instrumental|lofi|jhankar|slowed|reverb|live|female|male|unplugged|radio edit|original mix|extended mix|club mix|revisited|soundtrack|ost).*?[\)\]\}]|[-\u2013\u2014]\s*(?:version|remix|acoustic|instrumental|lofi|jhankar|slowed|reverb|live|female|male|unplugged|radio edit|original mix|extended mix|club mix|revisited|soundtrack|ost)$/i);
+  return match ? match[0].toLowerCase().replace(/[^\w]/g, '') : '';
 }
 
 function isDuplicate(a, b) {
@@ -695,6 +863,13 @@ function isDuplicate(a, b) {
   // Exact ISRC match: identical master recording
   if (a.isrc && b.isrc && String(a.isrc).trim().toUpperCase() === String(b.isrc).trim().toUpperCase()) {
     return true;
+  }
+
+  // Preserve distinct musical arrangements (Remixes, Acoustic, Instrumental, Live, etc.)
+  const tagA = extractVersionTag(a.title);
+  const tagB = extractVersionTag(b.title);
+  if (tagA !== tagB) {
+    return false;
   }
 
   if (a.duration && b.duration && Math.abs(a.duration - b.duration) > 15) {
@@ -748,7 +923,9 @@ function loadNotificationState() {
       if (data && Array.isArray(data.pending)) notifState.pending = data.pending;
       if (data && Array.isArray(data.sentDigests)) notifState.sentDigests = data.sentDigests;
       if (data && typeof data.lastDigestSent === 'number') notifState.lastDigestSent = data.lastDigestSent;
-      console.log(`[NotificationState] Loaded: ${notifState.pending.length} pending, ${notifState.sentDigests.length} sent digest(s)`);
+      if (notifState.pending.length > 0 || notifState.sentDigests.length > 0) {
+        logCli('DIGEST', `Restored ${BOLD}${notifState.pending.length}${RESET} pending notifications, ${BOLD}${notifState.sentDigests.length}${RESET} active digest(s)`);
+      }
     }
   } catch (err) {
     console.warn('[NotificationState] Failed to load state:', err.message);
@@ -837,7 +1014,7 @@ async function flushDigestNotifications() {
       actionLabel = item.reason === 'lower_quality' ? 'Lower Quality Removed' : 'Identical Duplicate Cleaned';
     }
 
-    text += `• <b>${item.title}</b> — <i>${item.artist}</i>\n`;
+    text += `• <b>${item.title}</b>: <i>${item.artist}</i>\n`;
     text += `  ✅ Kept: ${item.keptQuality} [${item.keptSize}]\n`;
     text += `  ❌ Deleted: ${item.deletedQuality} [${item.deletedSize}]\n`;
     text += `  <i>Reason: ${actionLabel}</i>\n\n`;
@@ -912,13 +1089,24 @@ async function sendChannelMessage(text, options = {}) {
         payload.reply_to_message_id = parseInt(options.replyTo, 10);
       }
 
-      const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      let res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
 
-      const data = await res.json();
+      let data = await res.json();
+      if (!data.ok && payload.reply_to_message_id) {
+        // Broadcast channel or chat may reject reply_to_message_id; retry without it
+        delete payload.reply_to_message_id;
+        res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        data = await res.json();
+      }
+
       if (data.ok && data.result) {
         return {
           id: data.result.message_id,
@@ -938,7 +1126,15 @@ async function sendChannelMessage(text, options = {}) {
       const gramOptions = { message: text };
       if (options.parseMode) gramOptions.parseMode = options.parseMode;
       if (options.replyTo) gramOptions.replyTo = parseInt(options.replyTo, 10);
-      return await client.sendMessage(channelEntity, gramOptions);
+      try {
+        return await client.sendMessage(channelEntity, gramOptions);
+      } catch (gramErr) {
+        if (gramOptions.replyTo) {
+          delete gramOptions.replyTo;
+          return await client.sendMessage(channelEntity, gramOptions);
+        }
+        throw gramErr;
+      }
     } catch (err) {
       console.warn('[Channel Notification Error]:', err.message);
       return null;
@@ -959,9 +1155,9 @@ async function sendChannelNotification(text) {
 }
 
 // Pending duplicate deletions: maps messageId (string) -> { timer, track, existingDup, reason }
-// Gives user a 30-second grace window to reply with /keep if they want to preserve the duplicate
+// Gives user a 6-hour grace window to reply with /keep if they want to preserve the duplicate
 const pendingDeletions = new Map();
-const DUPLICATE_GRACE_PERIOD_MS = 30000; // 30 seconds
+const DUPLICATE_GRACE_PERIOD_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 function cancelPendingDeletion(messageId) {
   const key = String(messageId);
@@ -996,8 +1192,13 @@ async function deleteMessageViaBot(msgId) {
         body: JSON.stringify({ chat_id: tgChatId, message_id: parseInt(msgId, 10) }),
       });
       const data = await res.json();
+      if (!data.ok) {
+        console.warn(`[Bot Delete Warning] Message ${msgId}: ${data.description || 'Bad Request'}`);
+      }
       return Boolean(data.ok && data.result);
-    } catch (_) {}
+    } catch (err) {
+      console.warn(`[Bot Delete Error] Message ${msgId}:`, err.message);
+    }
   }
   return false;
 }
@@ -1039,16 +1240,9 @@ let uploadBatchTimer = null;
 
 function flushUploadBatch() {
   if (uploadBatch.length === 0) return;
-  const count = uploadBatch.length;
-  if (count === 1) {
-    const t = uploadBatch[0];
-    console.log(`[Auto-indexed] "${t.title}" by ${t.artist} [${describeTrackQuality(t)}]`);
-  } else {
-    console.log(`\n[Batch Upload] Detected and indexed ${count} tracks:`);
-    for (const t of uploadBatch) {
-      console.log(`  • "${t.title}" - ${t.artist} [${describeTrackQuality(t)}]`);
-    }
-    console.log(`[Batch Complete] All ${count} tracks ready in BitChord.\n`);
+  for (const t of uploadBatch) {
+    const spec = t.isAtmos ? 'Dolby Atmos' : (t.quality || describeTrackQuality(t) || t.format);
+    logCli('INDEX', `${ITALIC}${t.title}${RESET} • ${BOLD}${t.artist}${RESET} • ${BOLD}${spec}${RESET}`);
   }
   uploadBatch = [];
   uploadBatchTimer = null;
@@ -1063,8 +1257,8 @@ function queueUploadedTrackLog(track) {
 async function processTrackUpload(newTrack) {
   if (!newTrack || !newTrack.id) return null;
 
-  // Prevent duplicate processing if this exact Telegram message is already indexed
-  if (trackIndex.some((t) => String(t.id) === String(newTrack.id))) {
+  // Prevent duplicate processing if this exact Telegram message is already indexed or pending deletion
+  if (trackIndex.some((t) => String(t.id) === String(newTrack.id)) || pendingDeletions.has(String(newTrack.id))) {
     return null;
   }
 
@@ -1087,11 +1281,9 @@ async function processTrackUpload(newTrack) {
   const scoreNew = getQualityScore(newTrack);
   const scoreOld = getQualityScore(existingDup);
 
-  console.log(`Duplicate detected for "${newTrack.title}"! Incoming score: ${scoreNew}, Existing score: ${scoreOld}`);
-
   if (scoreNew > scoreOld) {
     // Incoming track is HIGHER quality (e.g. 24/192 replacing 16/44.1, or FLAC replacing MP3)
-    console.log(`Upgrading "${newTrack.title}" from ${describeTrackQuality(existingDup)} to ${describeTrackQuality(newTrack)}`);
+    logCli('DUPLICATE', `${ITALIC}${newTrack.title}${RESET} -> Upgraded from ${describeTrackQuality(existingDup)} to ${BOLD}${describeTrackQuality(newTrack)}${RESET} (Replacing ID: ${existingDup.id})`);
 
     await deleteTelegramMessage(existingDup.id);
 
@@ -1114,17 +1306,26 @@ async function processTrackUpload(newTrack) {
 
     return newTrack;
   } else {
-    // Incoming track is LOWER or EQUAL quality: schedule deletion with 30s grace window!
+    // Incoming track is LOWER or EQUAL quality: schedule deletion with grace window!
     const isLower = scoreNew < scoreOld;
     const reason = isLower ? 'lower_quality' : 'identical';
-    const graceSec = Math.round(DUPLICATE_GRACE_PERIOD_MS / 1000);
-    console.log(`Scheduling duplicate deletion for "${newTrack.title}" (ID: ${newTrack.id}) in ${graceSec}s. Reply with /keep to preserve it.`);
+    const graceHours = Math.round(DUPLICATE_GRACE_PERIOD_MS / (60 * 60 * 1000));
+    const graceText = graceHours >= 1 ? `${graceHours} hours` : `${Math.round(DUPLICATE_GRACE_PERIOD_MS / 1000)}s`;
+    logCli('DUPLICATE', `${ITALIC}${newTrack.title}${RESET} (ID: ${BOLD}${newTrack.id}${RESET}) -> ${reason === 'lower_quality' ? 'Lower quality copy' : 'Identical copy'} (Deleting in ${graceText}, send /keep to save)`);
+
+    pendingDeletions.set(String(newTrack.id), {
+      timer: null,
+      track: newTrack,
+      existingDup,
+      reason,
+      noticeMsgId: null,
+    });
 
     let noticeMsg = null;
     if (channelEntity) {
       const noticeText = isLower
-        ? `<b>Duplicate detected:</b> Lower quality (${describeTrackQuality(newTrack)}) than existing copy (${describeTrackQuality(existingDup)}). Deleting in ${graceSec}s... (Send <code>/keep</code> to save)`
-        : `<b>Duplicate detected:</b> Identical copy already in library. Deleting in ${graceSec}s... (Send <code>/keep</code> to save)`;
+        ? `<b>Duplicate detected:</b> Lower quality (${describeTrackQuality(newTrack)}) than existing copy (${describeTrackQuality(existingDup)}). Deleting in ${graceText}... (Send <code>/keep</code> to save)`
+        : `<b>Duplicate detected:</b> Identical copy already in library. Deleting in ${graceText}... (Send <code>/keep</code> to save)`;
 
       noticeMsg = await sendChannelMessage(noticeText, {
         parseMode: 'html',
@@ -1134,7 +1335,7 @@ async function processTrackUpload(newTrack) {
 
     const timer = setTimeout(async () => {
       pendingDeletions.delete(String(newTrack.id));
-      console.log(`[Grace Period Expired] Deleting duplicate track: "${newTrack.title}" (ID: ${newTrack.id})`);
+      logCli('DUPLICATE', `${ITALIC}${newTrack.title}${RESET} (ID: ${BOLD}${newTrack.id}${RESET}) -> Grace period expired, deleted from channel`);
       const msgsToDelete = [newTrack.id];
       if (noticeMsg && noticeMsg.id) {
         deleteMessageViaBot(noticeMsg.id).catch(() => {});
@@ -1154,13 +1355,11 @@ async function processTrackUpload(newTrack) {
       });
     }, DUPLICATE_GRACE_PERIOD_MS);
 
-    pendingDeletions.set(String(newTrack.id), {
-      timer,
-      track: newTrack,
-      existingDup,
-      reason,
-      noticeMsgId: noticeMsg?.id || null,
-    });
+    const record = pendingDeletions.get(String(newTrack.id));
+    if (record) {
+      record.timer = timer;
+      record.noticeMsgId = noticeMsg?.id || null;
+    }
 
     return {
       discarded: true,
@@ -1172,9 +1371,16 @@ async function processTrackUpload(newTrack) {
 }
 
 async function deduplicateEntireLibrary() {
-  console.log('Scanning library for duplicates...');
   const removed = [];
-  const sorted = [...trackIndex].sort((a, b) => getQualityScore(b) - getQualityScore(a));
+  const sorted = [...trackIndex].sort((a, b) => {
+    const scoreDiff = getQualityScore(b) - getQualityScore(a);
+    if (scoreDiff !== 0) return scoreDiff;
+    // Tie-breaker: keep the one with slightly larger file size (often means better metadata/art)
+    const sizeDiff = (b.sizeBytes || 0) - (a.sizeBytes || 0);
+    if (sizeDiff !== 0) return sizeDiff;
+    // Final tie-breaker: keep the oldest track
+    return parseInt(a.id, 10) - parseInt(b.id, 10);
+  });
   const kept = [];
 
   for (const track of sorted) {
@@ -1188,7 +1394,7 @@ async function deduplicateEntireLibrary() {
     if (!dup) {
       kept.push(track);
     } else {
-      console.log(`Removing duplicate: "${track.title}" (ID: ${track.id}) in favor of (ID: ${dup.id})`);
+      logCli('DUPLICATE', `${ITALIC}${track.title}${RESET} (ID: ${BOLD}${track.id}${RESET}) -> Removed duplicate in favor of ID: ${BOLD}${dup.id}${RESET}`);
       await deleteTelegramMessage(track.id);
       removed.push({ deleted: track, kept: dup });
 
@@ -1209,15 +1415,15 @@ async function deduplicateEntireLibrary() {
   if (removed.length > 0) {
     trackIndex = kept;
     saveCache();
-    console.log(`Deduplication complete! Removed ${removed.length} duplicate(s).`);
+    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded ${DIM}• Removed ${removed.length} duplicates${RESET}`);
     await flushDigestNotifications();
   } else {
-    console.log('Deduplication check: Library is 100% clean, no duplicates found.');
+    logCli('LIBRARY', `Indexing complete: ${BOLD}${trackIndex.length}${RESET} tracks loaded ${DIM}• Deduplication 100% clean${RESET}`);
   }
 
   await cleanupOrphanedDuplicateNotices().catch(() => {});
 
-  return { checked: sorted.length, duplicatesRemoved: removed.length, removed };
+  return { checked: trackIndex.length, duplicatesRemoved: removed.length, removed };
 }
 
 let isIndexing = false;
@@ -1263,8 +1469,8 @@ async function buildTrackIndex() {
     updateMediaCacheCapacity();
     lastIndexed = Date.now();
     saveCache();
-    console.log(`[Library] Channel indexing complete: ${trackIndex.length} tracks loaded.`);
     await deduplicateEntireLibrary();
+    rebuildWebDavFileMap();
   } catch (err) {
     console.error('Error during track indexing:', err.message);
   } finally {
@@ -1277,50 +1483,80 @@ function findTrack(id) {
 }
 
 // ── Optional Secret URL Path Protection ────────────────────────────────────
-if (URL_SECRET) {
-  app.use((req, res, next) => {
-    // Exempt uptime health monitoring and addon icon
-    if (req.path === '/ping' || req.path === '/icon.png') {
-      return next();
+app.use((req, res, next) => {
+  const currentSecret = getUrlSecret();
+
+  // Exempt setup routes, static assets, health monitoring, and icon
+  if (
+    req.path.startsWith('/setup') ||
+    req.path.startsWith('/public') ||
+    req.path.startsWith('/api/setup') ||
+    req.path === '/ping' ||
+    req.path === '/icon.png' ||
+    req.path === '/favicon.ico'
+  ) {
+    return next();
+  }
+
+  // If no secret is configured, allow all traffic directly
+  if (!currentSecret) {
+    return next();
+  }
+
+  const prefix = `/${currentSecret}`;
+  const encodedPrefix = `/${encodeURIComponent(currentSecret)}`;
+  const matchedPrefix =
+    req.url === prefix || req.url.startsWith(`${prefix}/`) || req.url.startsWith(`${prefix}?`)
+      ? prefix
+      : req.url === encodedPrefix || req.url.startsWith(`${encodedPrefix}/`) || req.url.startsWith(`${encodedPrefix}?`)
+      ? encodedPrefix
+      : null;
+
+  if (matchedPrefix) {
+    req.secretPrefix = currentSecret;
+    let newUrl = req.url.slice(matchedPrefix.length);
+    if (!newUrl.startsWith('/')) {
+      newUrl = '/' + newUrl;
     }
+    req.url = newUrl;
+    req._parsedUrl = undefined;
+    return next();
+  }
 
-    const prefix = `/${URL_SECRET}`;
-    const encodedPrefix = `/${encodeURIComponent(URL_SECRET)}`;
-    const matchedPrefix =
-      req.url === prefix || req.url.startsWith(`${prefix}/`) || req.url.startsWith(`${prefix}?`)
-        ? prefix
-        : req.url === encodedPrefix || req.url.startsWith(`${encodedPrefix}/`) || req.url.startsWith(`${encodedPrefix}?`)
-        ? encodedPrefix
-        : null;
+  // Also support secret via query param or authorization header (Bearer or Basic)
+  if (
+    req.query.secret === currentSecret ||
+    req.headers['x-secret-token'] === currentSecret ||
+    req.headers.authorization === `Bearer ${currentSecret}`
+  ) {
+    req.secretPrefix = currentSecret;
+    return next();
+  }
 
-    if (matchedPrefix) {
-      req.secretPrefix = URL_SECRET;
-      let newUrl = req.url.slice(matchedPrefix.length);
-      if (!newUrl.startsWith('/')) {
-        newUrl = '/' + newUrl;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Basic ')) {
+    try {
+      const credentials = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf8');
+      const [user, pass] = credentials.split(':');
+      if (user === currentSecret || pass === currentSecret) {
+        req.secretPrefix = '';
+        return next();
       }
-      req.url = newUrl;
-      req._parsedUrl = undefined;
-      return next();
-    }
+    } catch (_) {}
+  }
 
-    // Also support secret via query param or authorization header
-    if (
-      req.query.secret === URL_SECRET ||
-      req.headers['x-secret-token'] === URL_SECRET ||
-      req.headers.authorization === `Bearer ${URL_SECRET}`
-    ) {
-      req.secretPrefix = URL_SECRET;
-      return next();
-    }
+  // For WebDAV clients accessing /dav without credentials, challenge with Basic Auth
+  const isWebDavPath = req.url === '/dav' || req.url.startsWith('/dav/') || req.url.startsWith('/dav?');
+  if (isWebDavPath) {
+    res.setHeader('WWW-Authenticate', 'Basic realm="TeleMusic WebDAV"');
+    return res.status(401).send('Unauthorized: WebDAV requires authentication');
+  }
 
-    console.warn(`[Security] Blocked unauthorized request to ${req.originalUrl || req.url} from ${req.ip}`);
-    return res.status(401).json({
-      error: 'Unauthorized: invalid or missing secret path',
-      message: 'This Telegram Music instance requires a valid secret URL prefix (e.g. /:secret/manifest.json)',
-    });
+  console.warn(`[Security] Blocked unauthorized request to ${req.originalUrl || req.url} from ${req.ip}`);
+  return res.status(401).json({
+    error: 'Unauthorized: invalid or missing secret path',
+    message: 'This Telegram Music Addon instance requires a valid secret URL prefix (e.g. /:secret/manifest.json)',
   });
-}
+});
 
 // ── BitChord / Stremio Addon Endpoints ─────────────────────────────────────
 
@@ -1335,6 +1571,22 @@ app.get('/icon.png', (req, res) => {
   res.status(404).send('Icon not found');
 });
 
+// Favicon: Serve icon.png for browsers requesting /favicon.ico
+app.get('/favicon.ico', (req, res) => {
+  const iconPath = path.resolve(__dirname, 'icon.png');
+  if (fs.existsSync(iconPath)) {
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    return res.sendFile(iconPath);
+  }
+  res.status(404).end();
+});
+
+// Mobile Install Page: Clean landing page for mobile scanning
+app.get('/install', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'install.html'));
+});
+
 // Manifest: BitChord queries this to verify addon id, name, and capabilities
 app.get('/manifest.json', (req, res) => {
   const base = getBaseUrl(req);
@@ -1342,7 +1594,7 @@ app.get('/manifest.json', (req, res) => {
   res.setHeader('Cache-Control', 'public, max-age=600');
   res.json({
     id: 'com.personal.telegrammusic',
-    name: 'Telegram Music',
+    name: 'Telegram Music Addon',
     version: `${pkg.version} • ${trackIndex.length} songs`,
     description: 'Personal hi-res, lossless, and high-quality music library streamed directly from Telegram',
     icon: `${base}/icon.png`,
@@ -1431,10 +1683,76 @@ app.get('/notifications/flush', async (req, res) => {
   }
 });
 
+// Clean lossy tracks endpoint: purges lossy MP3/M4A/Opus tracks under threshold (default 10MB)
+app.all('/clean-lossy', async (req, res) => {
+  try {
+    const maxSizeMb = Number(req.query.maxSizeMb) || 10;
+    const confirm = req.query.confirm === 'true';
+
+    const targets = trackIndex.filter((t) => {
+      if (t.keep) return false;
+      const isAtmos = Boolean(t.isAtmos || t.format === 'eac3-joc' || t.quality === 'Dolby Atmos');
+      const fmt = (t.format || '').toLowerCase();
+      const sizeMb = (t.sizeBytes || 0) / (1024 * 1024);
+      return !isAtmos && !['flac', 'alac', 'wav'].includes(fmt) && sizeMb <= maxSizeMb;
+    });
+
+    if (!confirm) {
+      return res.json({
+        dryRun: true,
+        count: targets.length,
+        message: 'Pass ?confirm=true to permanently delete these messages from Telegram and remove from library.',
+        tracks: targets.map((t) => ({
+          id: t.id,
+          title: t.title,
+          artist: t.artist,
+          format: t.format,
+          sizeMb: ((t.sizeBytes || 0) / (1024 * 1024)).toFixed(2),
+        })),
+      });
+    }
+
+    const idsToDelete = targets.map((t) => t.id);
+    if (idsToDelete.length > 0) {
+      console.log(`[Clean Lossy] Deleting ${idsToDelete.length} lossy tracks from Telegram channel...`);
+      // Delete in batches of 50 to respect Telegram bulk deletion limits
+      for (let i = 0; i < idsToDelete.length; i += 50) {
+        const batch = idsToDelete.slice(i, i + 50);
+        await deleteTelegramMessages(batch);
+      }
+
+      const targetIdSet = new Set(idsToDelete.map(String));
+      trackIndex = trackIndex.filter((t) => !targetIdSet.has(String(t.id)));
+      for (const id of idsToDelete) {
+        mediaCache.delete(id);
+        fastStartCache.delete(id);
+      }
+      saveCache();
+      updateMediaCacheCapacity();
+      console.log(`[Clean Lossy] Successfully deleted ${idsToDelete.length} lossy tracks.`);
+    }
+
+    res.json({
+      success: true,
+      deletedCount: idsToDelete.length,
+      deletedTracks: targets.map((t) => ({
+        id: t.id,
+        title: t.title,
+        artist: t.artist,
+        format: t.format,
+        sizeMb: ((t.sizeBytes || 0) / (1024 * 1024)).toFixed(2),
+      })),
+    });
+  } catch (err) {
+    console.error('Clean lossy error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const ARTIST_SEPARATORS_REGEX = /\s*(?:[,&/;·|]|\band\b|\bx\b|\bvs\.?\b|\bfeat\.?\b|\bft\.?\b|\bfeaturing\b|\bwith\b)\s*/i;
 const BRACKETED_REGEX = /[([][^()[\]]*[)\]]/g;
 const NOISE_WORDS_REGEX = /\b(?:official|video|audio|lyrics|lyric|lyrical|song|songs|full|hd|hq|4k|mp3|flac|ost|soundtrack|remaster|remastered|atmos|dolby)\b/gi;
-const VERSION_SUFFIX_REGEX = /\s+[-–—]+\s+(?:new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|original mix|extended mix|deluxe).*$/gi;
+const VERSION_SUFFIX_REGEX = /\s+[-\u2013\u2014]+\s+(?:new version|version|lofi|remix|acoustic|live|slowed|reverb|edit|revisited|unplugged|original mix|extended mix|deluxe).*$/gi;
 
 function extractCoreTitle(title) {
   if (!title) return '';
@@ -1444,6 +1762,36 @@ function extractCoreTitle(title) {
   clean = clean.replace(VERSION_SUFFIX_REGEX, ' ');
   clean = clean.replace(/[^\p{L}\p{N}\s]/gu, ' ');
   return clean.replace(/\s+/g, ' ').trim();
+}
+
+function indexTrackKeywords(t) {
+  if (!t) return t;
+  const words = new Set();
+  const rawWordsList = [];
+  const addWords = (str) => {
+    if (!str) return;
+    const tokens = String(str).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    for (const tok of tokens) {
+      words.add(tok);
+      rawWordsList.push(tok);
+    }
+  };
+
+  addWords(t.title);
+  addWords(extractCoreTitle(t.title));
+  addWords(t.artist);
+  addWords(t.album);
+  if (t.isrc) words.add(String(t.isrc).toLowerCase().trim());
+
+  Object.defineProperty(t, '_searchWords', { value: words, enumerable: false, writable: true, configurable: true });
+  Object.defineProperty(t, '_searchWordsArray', { value: rawWordsList, enumerable: false, writable: true, configurable: true });
+  Object.defineProperty(t, '_searchFullText', {
+    value: `${(t.title || '').toLowerCase()} ${(t.artist || '').toLowerCase()} ${(t.album || '').toLowerCase()}`,
+    enumerable: false,
+    writable: true,
+    configurable: true,
+  });
+  return t;
 }
 
 function parseArtistTokens(artistStr) {
@@ -1688,7 +2036,50 @@ app.get('/search', async (req, res) => {
       const targetDuration = parseInt(req.query.duration || req.query.d, 10) || null;
       const qContext = { qClean: q, queryCore, queryTokens, wordRegex, targetDuration };
 
-      const scoredCandidates = trackIndex
+      // Phase 1: Fast Gatekeeper Candidate Selection (<0.5ms filter)
+      const candidates = [];
+      for (let i = 0; i < trackIndex.length; i++) {
+        const t = trackIndex[i];
+        let isCandidate = false;
+
+        if (t._searchWords) {
+          for (let j = 0; j < queryTokens.length; j++) {
+            const qTok = queryTokens[j];
+            if (t._searchWords.has(qTok)) {
+              isCandidate = true;
+              break;
+            }
+            if (qTok.length >= 4 && t._searchWordsArray) {
+              for (let k = 0; k < t._searchWordsArray.length; k++) {
+                const tw = t._searchWordsArray[k];
+                if (tw.startsWith(qTok) || qTok.startsWith(tw)) {
+                  isCandidate = true;
+                  break;
+                }
+              }
+              if (isCandidate) break;
+            }
+          }
+        } else {
+          // Lazy index track on the fly if not indexed yet
+          indexTrackKeywords(t);
+          isCandidate = true;
+        }
+
+        if (!isCandidate && q.length >= 4 && t._searchFullText && t._searchFullText.includes(q)) {
+          isCandidate = true;
+        }
+
+        if (isCandidate) {
+          candidates.push(t);
+        }
+      }
+
+      // Safety fallback: if no candidate matched (e.g. extreme typo or edge case), evaluate all tracks
+      const pool = candidates.length > 0 ? candidates : trackIndex;
+
+      // Phase 2: Surgical Multi-Token Scoring & Ranking
+      const scoredCandidates = pool
         .map((t) => {
           let score = scoreTrackMatch(t, qContext);
           if (score > 0 && prefersAtmos && t.isAtmos) {
@@ -1719,9 +2110,9 @@ app.get('/search', async (req, res) => {
     if (q) {
       const topMatch = matches[0];
       const topStr = topMatch
-        ? ` -> Top match: "${topMatch.title}" (ID: ${topMatch.id})`
-        : ' -> No match';
-      console.log(`[Search] "${q}" (${matches.length} found, ${elapsed}ms)${topStr}`);
+        ? ` -> ID: ${BOLD}${topMatch.id}${RESET}`
+        : ` -> ${DIM}No match${RESET}`;
+      logCli('SEARCH', `${ITALIC}"${q}"${RESET} ${DIM}(${matches.length} hits, ${elapsed}ms)${RESET}${topStr}`);
     }
     recordRequest({
       timestamp: new Date().toISOString(),
@@ -1799,8 +2190,6 @@ app.get('/stream/:id', (req, res) => {
   const qualityTier = isAtmos ? 'DOLBY_ATMOS' : (isHiRes ? 'HI_RES' : (isLossless ? 'LOSSLESS' : 'HIGH'));
 
   if (track) {
-    const durStr = formatTrackDuration(track.duration);
-    console.log(`[Queue Ready] "${track.title}" ${durStr ? `(${durStr}) ` : ''}[${isAtmos ? 'Dolby Atmos' : (track.quality || track.format)}]`);
     const cached = fastStartCache.get(req.params.id);
     if (!cached || cached.length < FAST_START_BYTES) {
       setImmediate(() => {
@@ -1861,7 +2250,8 @@ app.get('/artwork/:id', async (req, res) => {
     if (stripped) {
       const jpg = utils.strippedPhotoToJpg(stripped.bytes);
       res.setHeader('Content-Type', 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=86400');
+      res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+      res.setHeader('ETag', `"${track.id}-art"`);
       return res.send(jpg);
     }
 
@@ -1885,7 +2275,8 @@ app.get('/artwork/:id', async (req, res) => {
     }
 
     res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+    res.setHeader('ETag', `"${track.id}-art"`);
     res.send(thumbBuf);
   } catch (err) {
     console.error('Artwork fetch error:', err.message);
@@ -1893,7 +2284,7 @@ app.get('/artwork/:id', async (req, res) => {
   }
 });
 
-app.get('/audio/:id', async (req, res) => {
+async function streamAudioTrack(trackId, req, res) {
   const reqStart = Date.now();
   let isConnectionClosed = false;
   let iterator = null;
@@ -1909,18 +2300,18 @@ app.get('/audio/:id', async (req, res) => {
   });
 
   try {
-    const track = findTrack(req.params.id);
+    const track = findTrack(trackId);
     if (!track) return res.status(404).send('Track not found');
 
-    const media = await getMediaForTrack(req.params.id);
+    const media = await getMediaForTrack(trackId);
     if (!media) return res.status(404).send('Media not found');
 
     if (isConnectionClosed) return;
 
     // If a background pre-warm is currently running for this track, cancel it to prevent duplicate MTProto downloads
-    if (inFlightPrewarmIters.has(req.params.id)) {
-      const bgIter = inFlightPrewarmIters.get(req.params.id);
-      inFlightPrewarmIters.delete(req.params.id);
+    if (inFlightPrewarmIters.has(trackId)) {
+      const bgIter = inFlightPrewarmIters.get(trackId);
+      inFlightPrewarmIters.delete(trackId);
       if (bgIter) {
         bgIter.left = 0;
         if (typeof bgIter.close === 'function') bgIter.close().catch(() => {});
@@ -1929,7 +2320,7 @@ app.get('/audio/:id', async (req, res) => {
 
     const totalSize = Number(track.sizeBytes) || Number(media.document?.size) || 0;
     if (!totalSize || isNaN(totalSize)) {
-      console.error(`Invalid totalSize for track ${req.params.id}`);
+      console.error(`Invalid totalSize for track ${trackId}`);
       return res.status(500).send('Unable to determine audio file size');
     }
     if (!track.sizeBytes) {
@@ -1966,28 +2357,92 @@ app.get('/audio/:id', async (req, res) => {
     end = Math.max(start, Math.min(end, totalSize - 1));
     const bytesNeeded = end - start + 1;
 
+    // Detect if request originated from WebDAV (/dav)
+    const isWebDav = Boolean(
+      (req.originalUrl && req.originalUrl.includes('/dav')) ||
+      (req.baseUrl && req.baseUrl.includes('/dav')) ||
+      (req.path && req.path.includes('/dav'))
+    );
+
+    // Fast cache validation
+    if (!isRange && req.headers['if-none-match'] === `"${track.id}-${totalSize}"`) {
+      return res.status(304).end();
+    }
+
+    // Return cached header or tag slice when available
+    if (tagSliceCache.has(trackId)) {
+      const cachedTagBuf = tagSliceCache.get(trackId);
+      if (cachedTagBuf && start < cachedTagBuf.length) {
+        const availableInTagCache = cachedTagBuf.length - start;
+        if (availableInTagCache >= bytesNeeded) {
+          res.status(isRange ? 206 : 200);
+          res.setHeader('Content-Type', track.isAtmos ? 'audio/mp4' : (track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream')));
+          res.setHeader('Accept-Ranges', 'bytes');
+          res.setHeader('Connection', 'keep-alive');
+          res.setHeader('Keep-Alive', 'timeout=30, max=100');
+          res.setHeader('Content-Length', bytesNeeded);
+          if (isRange) {
+            res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
+          }
+          res.setHeader('ETag', `"${track.id}-${totalSize}"`);
+          res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+          if (req.method === 'HEAD') return res.end();
+          return res.send(cachedTagBuf.slice(start, start + bytesNeeded));
+        }
+      }
+    }
+
     const isAudition = (start === 0 && bytesNeeded <= 128 * 1024);
-    const isPlaybackStart = (start <= 128 * 1024 && bytesNeeded > 128 * 1024);
+    const isPlaybackStart = (start === 0 && bytesNeeded > 128 * 1024);
 
     const durStr = formatTrackDuration(track.duration);
     const durPart = durStr ? `${durStr}, ` : '';
 
-    if (isAudition) {
-      console.log(`[Audition] "${track.title}" (ID: ${track.id}) (${Math.round(bytesNeeded / 1024)} KB probe)`);
-    } else if (isPlaybackStart) {
+    const statusStr = isRange ? '206 Partial' : '200 OK';
+
+    if (lastServedAudioTrackId !== track.id && (isAudition || isPlaybackStart)) {
+      lastServedAudioTrackId = track.id;
+    }
+
+    let hasLoggedPlayback = false;
+    const maybeLogPlayback = (deliveredBytes) => {
+      if (hasLoggedPlayback || !isPlaybackStart) return;
+      if (deliveredBytes < Math.min(256 * 1024, bytesNeeded)) return;
+      hasLoggedPlayback = true;
       const now = Date.now();
       if (currentlyPlayingTrackId !== track.id || (now - lastPlaybackLogTime > 4000)) {
         currentlyPlayingTrackId = track.id;
         lastPlaybackLogTime = now;
+        lastSeekLogTime = now;
+        lastSeekStart = 0;
         const sizeMb = (totalSize / (1024 * 1024)).toFixed(1);
-        console.log(`[Playback] "${track.title}" (ID: ${track.id}) (${durPart}${sizeMb} MB) [${track.isAtmos ? 'Dolby Atmos' : (track.quality || track.format)}]`);
+        const spec = track.isAtmos ? 'Dolby Atmos' : (track.quality || track.format);
+        const durPartFormatted = durStr ? ` ${DIM}(${durStr})${RESET}` : '';
+        const tag = isWebDav ? 'WEBDAV' : (isRange ? 'STREAM' : 'PRECACHE');
+        logCli(tag, `${ITALIC}${track.title}${RESET} • ${BOLD}${spec}${RESET} • ${BOLD}${sizeMb} MB${RESET}${durPartFormatted} ${DIM}-> ${statusStr}${RESET}`);
+      }
+    };
+
+    if (isAudition && !isWebDav && process.env.DEBUG_PROBES === 'true') {
+      logCli('PROBE', `${ITALIC}${track.title}${RESET} ${DIM}(${Math.round(bytesNeeded / 1024)} KB header read)${RESET}`);
+    } else if (isRange && start >= 10 * 1024 * 1024 && bytesNeeded > 128 * 1024) {
+      const now = Date.now();
+      if ((now - lastSeekLogTime > 2000) || Math.abs(start - lastSeekStart) > 2 * 1024 * 1024) {
+        lastSeekLogTime = now;
+        lastSeekStart = start;
+        const seekRatio = totalSize > 0 ? (start / totalSize) : 0;
+        const seekSec = Math.round(seekRatio * (track.duration || 0));
+        const seekTimeStr = formatTrackDuration(seekSec) || '0:00';
+        const percent = Math.round(seekRatio * 100);
+        const seekMb = (start / (1024 * 1024)).toFixed(1);
+        logCli('SEEK', `${ITALIC}${track.title}${RESET} • ${BOLD}Seeked to ~${seekTimeStr}${RESET} ${DIM}(${percent}%) • ${seekMb} MB${RESET}`);
       }
     }
 
     recordRequest({
       timestamp: new Date().toISOString(),
       type: 'audio',
-      id: req.params.id,
+      id: trackId,
       range: range || 'none',
       bytes: `${start}-${end}/${totalSize}`,
       bytesNeeded,
@@ -2003,10 +2458,16 @@ app.get('/audio/:id', async (req, res) => {
     if (isRange) {
       res.setHeader('Content-Range', `bytes ${start}-${end}/${totalSize}`);
     }
+    res.setHeader('ETag', `"${track.id}-${totalSize}"`);
+    res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+
+    if (req.method === 'HEAD') {
+      return res.end();
+    }
 
     // Telegram MTProto upload.GetFile requires requestSize to be a power of 2 (up to 512KB)
     // and offset MUST be an exact multiple of requestSize (offset % requestSize === 0).
-    const dynamicBlockSize = 512 * 1024;
+    const dynamicBlockSize = (bytesNeeded <= 128 * 1024) ? (128 * 1024) : (512 * 1024);
 
     // Fast-Start RAM cache check
     let bytesSent = 0;
@@ -2018,21 +2479,22 @@ app.get('/audio/:id', async (req, res) => {
       req.once('close', onClose);
     });
 
-    const cachedPreamble = fastStartCache.get(req.params.id);
-    const isPreambleStart = (start === 0 || start === 65536);
-    const useFastStart = isPreambleStart && cachedPreamble && (start < cachedPreamble.length);
+    const cachedPreamble = fastStartCache.get(trackId);
+    const useFastStart = Boolean(cachedPreamble && start < cachedPreamble.length);
 
     if (useFastStart) {
-      // 1. Immediately flush cached preamble from RAM (<5ms start)
       const preambleSlice = cachedPreamble.slice(start, Math.min(cachedPreamble.length, start + bytesNeeded));
+      if (!tagSliceCache.has(trackId)) {
+        tagSliceCache.set(trackId, cachedPreamble.slice(0, Math.min(cachedPreamble.length, 256 * 1024)));
+      }
       const canContinue = res.write(preambleSlice);
       bytesSent += preambleSlice.length;
+      maybeLogPlayback(bytesSent);
 
       if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
         await waitForDrain();
       }
 
-      // If the request was completely satisfied by preamble (e.g. 64KB audition probe)
       if (bytesSent >= bytesNeeded) {
         if (!res.writableEnded && !isConnectionClosed) {
           res.end();
@@ -2041,11 +2503,12 @@ app.get('/audio/:id', async (req, res) => {
       }
     }
 
-    // 2. Stream remaining bytes live from Telegram MTProto
+    // Stream remaining bytes live from Telegram MTProto
     let currentMedia = media;
     let hasRefreshedRef = false;
-    const preambleChunks = [];
-    let preambleBytesCollected = 0;
+    let existingCacheBuf = fastStartCache.get(trackId);
+    let cacheBytesCollected = existingCacheBuf ? existingCacheBuf.length : 0;
+    const preambleChunks = existingCacheBuf ? [existingCacheBuf] : [];
 
     while (bytesSent < bytesNeeded && !isConnectionClosed && !res.writableEnded && !res.destroyed) {
       const currentBytePos = start + bytesSent;
@@ -2067,17 +2530,34 @@ app.get('/audio/:id', async (req, res) => {
             break;
           }
 
-          // Populate fastStartCache from the very beginning of the track if captured
-          if (alignedOffset === 0 && !fastStartCache.has(req.params.id) && preambleBytesCollected < FAST_START_BYTES) {
-            const needed = FAST_START_BYTES - preambleBytesCollected;
-            preambleChunks.push(chunk.slice(0, needed));
-            preambleBytesCollected += Math.min(chunk.length, needed);
-            if (preambleBytesCollected >= FAST_START_BYTES || preambleBytesCollected >= totalSize) {
+          if (start === 0 && !tagSliceCache.has(trackId)) {
+            const sliceLen = Math.min(256 * 1024, chunk.length);
+            if (sliceLen > 0) {
+              tagSliceCache.set(trackId, chunk.slice(0, sliceLen));
+            }
+          }
+
+          // Populate/extend fastStartCache up to FAST_START_BYTES only for real playback starts (start === 0)
+          // This prevents background tag reads from evicting playing songs from RAM cache!
+          if (start === 0 && alignedOffset === cacheBytesCollected && cacheBytesCollected < FAST_START_BYTES) {
+            const needed = FAST_START_BYTES - cacheBytesCollected;
+            const slice = chunk.slice(0, needed);
+            preambleChunks.push(slice);
+            cacheBytesCollected += slice.length;
+            if (cacheBytesCollected >= FAST_START_BYTES || cacheBytesCollected >= totalSize) {
               const fullPreamble = Buffer.concat(preambleChunks);
-              fastStartCache.set(req.params.id, fullPreamble);
-              const capturedKb = Math.round(fullPreamble.length / 1024);
-              const trackTitle = track?.title || 'track';
-              console.log(`[FastStart] Captured ${capturedKb} KB preamble for "${trackTitle}" (ID: ${req.params.id})`);
+              fastStartCache.set(trackId, fullPreamble);
+              tagSliceCache.set(trackId, fullPreamble.slice(0, Math.min(fullPreamble.length, 256 * 1024)));
+              const sizeFormatted = fullPreamble.length >= 1024 * 1024
+                ? `${(fullPreamble.length / (1024 * 1024)).toFixed(1)} MB`
+                : `${Math.round(fullPreamble.length / 1024)} KB`;
+              if (!isWebDav) {
+                logCli('BUFFER', `Prewarmed ${BOLD}${sizeFormatted}${RESET} -> ID: ${BOLD}${trackId}${RESET}`);
+              }
+            } else {
+              const partial = Buffer.concat(preambleChunks);
+              fastStartCache.set(trackId, partial);
+              tagSliceCache.set(trackId, partial.slice(0, Math.min(partial.length, 256 * 1024)));
             }
           }
 
@@ -2101,11 +2581,11 @@ app.get('/audio/:id', async (req, res) => {
           }
 
           bytesSent += toSend.length;
+          maybeLogPlayback(bytesSent);
           if (bytesSent >= bytesNeeded) {
             shouldBreak = true;
           }
 
-          // Handle backpressure: pause pulling chunks if client network buffer is full
           const canContinue = res.write(toSend);
           if (!canContinue && !res.writableEnded && !res.destroyed && !isConnectionClosed) {
             await waitForDrain();
@@ -2117,15 +2597,15 @@ app.get('/audio/:id', async (req, res) => {
             break;
           }
         }
-        break; // Successfully finished streaming range
+        break;
       } catch (iterErr) {
         if (!hasRefreshedRef && isFileReferenceError(iterErr)) {
           hasRefreshedRef = true;
-          console.warn(`[FileRef] File reference expired for "${track.title}" (ID: ${req.params.id}). Refreshing from Telegram cloud...`);
-          const freshMedia = await getMediaForTrack(req.params.id, true);
+          console.warn(`[FileRef] File reference expired for "${track.title}" (ID: ${trackId}). Refreshing from Telegram cloud...`);
+          const freshMedia = await getMediaForTrack(trackId, true);
           if (freshMedia) {
             currentMedia = freshMedia;
-            console.log(`[FileRef] Refreshed file reference for "${track.title}" (ID: ${req.params.id}). Resuming stream from byte ${start + bytesSent}...`);
+            console.log(`[FileRef] Refreshed file reference for "${track.title}" (ID: ${trackId}). Resuming stream from byte ${start + bytesSent}...`);
             continue;
           }
         }
@@ -2138,11 +2618,275 @@ app.get('/audio/:id', async (req, res) => {
     }
   } catch (err) {
     if (!isConnectionClosed && !res.destroyed) {
-      console.error(`Audio stream error for track ${req.params.id}:`, err.message);
+      console.error(`Audio stream error for track ${trackId}:`, err.message);
       if (!res.headersSent) res.status(500).send(err.message);
       else res.end();
     }
   }
+}
+
+app.get('/audio/:id', (req, res) => streamAudioTrack(req.params.id, req, res));
+app.head('/audio/:id', (req, res) => streamAudioTrack(req.params.id, req, res));
+
+// ── WebDAV Protocol Implementation (/dav) ───────────────────────────────────
+
+function sanitizeWebDavName(name) {
+  return String(name || '')
+    .replace(/[/\\?%*:|"<>]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const webDavFileMap = new Map();
+
+function getTrackWebDavAlbum(track) {
+  if (track && track._webDavAlbum) return track._webDavAlbum;
+  const rawAlbum = (track && track.album) ? String(track.album).trim() : '';
+  const album = sanitizeWebDavName(rawAlbum) || 'Singles';
+  if (track) track._webDavAlbum = album;
+  return album;
+}
+
+function getTrackWebDavFileName(track) {
+  if (track && track._webDavFileName) return track._webDavFileName;
+  const ext = track.format === 'flac' ? 'flac' : (track.format === 'alac' ? 'm4a' : (track.isAtmos || track.format === 'eac3-joc' ? 'm4a' : (track.format || 'flac')));
+  const artist = sanitizeWebDavName(track.artist || 'Unknown Artist');
+  const title = sanitizeWebDavName(track.title || 'Untitled');
+  return `${artist} - ${title}.${ext}`;
+}
+
+function rebuildWebDavFileMap() {
+  webDavFileMap.clear();
+  const seenCount = new Map();
+  for (const track of trackIndex) {
+    const ext = track.format === 'flac' ? 'flac' : (track.format === 'alac' ? 'm4a' : (track.isAtmos || track.format === 'eac3-joc' ? 'm4a' : (track.format || 'flac')));
+    const artist = sanitizeWebDavName(track.artist || 'Unknown Artist');
+    const title = sanitizeWebDavName(track.title || 'Untitled');
+    const album = getTrackWebDavAlbum(track);
+    const baseClean = `${artist} - ${title}`;
+    const baseKey = `${album.toLowerCase()}:::${baseClean.toLowerCase()}`;
+
+    let finalName = `${baseClean}.${ext}`;
+    if (seenCount.has(baseKey)) {
+      const count = seenCount.get(baseKey) + 1;
+      seenCount.set(baseKey, count);
+      finalName = `${baseClean} (${count}).${ext}`;
+    } else {
+      seenCount.set(baseKey, 1);
+    }
+
+    track._webDavFileName = finalName;
+    track._webDavAlbum = album;
+
+    const fullPathKey = `${album.toLowerCase()}/${finalName.toLowerCase()}`;
+    webDavFileMap.set(fullPathKey, track.id);
+    webDavFileMap.set(`${encodeURIComponent(album).toLowerCase()}/${encodeURIComponent(finalName).toLowerCase()}`, track.id);
+
+    webDavFileMap.set(finalName.toLowerCase(), track.id);
+    webDavFileMap.set(encodeURIComponent(finalName).toLowerCase(), track.id);
+  }
+}
+
+function getTrackIdFromWebDavPath(urlPath) {
+  if (!urlPath) return null;
+  let decoded = urlPath;
+  try {
+    decoded = decodeURIComponent(urlPath);
+  } catch (_) {}
+  const segments = decoded.replace(/^\/+/, '').split('/').filter(Boolean);
+  if (segments.length >= 2) {
+    const albumFolder = segments[segments.length - 2].trim().toLowerCase();
+    const fileName = segments[segments.length - 1].trim().toLowerCase();
+    const combinedKey = `${albumFolder}/${fileName}`;
+    if (webDavFileMap.has(combinedKey)) {
+      return webDavFileMap.get(combinedKey);
+    }
+  }
+  const targetFile = (segments[segments.length - 1] || '').trim().toLowerCase();
+  if (webDavFileMap.has(targetFile)) {
+    return webDavFileMap.get(targetFile);
+  }
+  const matchBracket = decoded.match(/\[(\d+)\]\.[a-zA-Z0-9]+$/);
+  if (matchBracket) return matchBracket[1];
+  const matchParen = decoded.match(/\((\d+)\)\.[a-zA-Z0-9]+$/);
+  if (matchParen) return matchParen[1];
+  const matchIdExt = decoded.match(/(?:^|\/)(\d+)\.[a-zA-Z0-9]+$/);
+  if (matchIdExt) return matchIdExt[1];
+  const matchDirect = decoded.match(/(?:^|\/)(\d+)$/);
+  if (matchDirect) return matchDirect[1];
+  return null;
+}
+
+function escapeXml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+function buildWebDavCollectionXml(href, displayName, lastMod = new Date().toUTCString()) {
+  let xml = `  <D:response>\n`;
+  xml += `    <D:href>${href}</D:href>\n`;
+  xml += `    <D:propstat>\n`;
+  xml += `      <D:prop>\n`;
+  xml += `        <D:resourcetype><D:collection/></D:resourcetype>\n`;
+  xml += `        <D:displayname>${escapeXml(displayName)}</D:displayname>\n`;
+  xml += `        <D:getlastmodified>${lastMod}</D:getlastmodified>\n`;
+  xml += `      </D:prop>\n`;
+  xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+  xml += `    </D:propstat>\n`;
+  xml += `  </D:response>\n`;
+  return xml;
+}
+
+function buildWebDavFileXml(href, fileName, track) {
+  const sizeBytes = track.sizeBytes || 0;
+  const mimeType = track.isAtmos ? 'audio/mp4' : (track.mimeType || (track.format === 'flac' ? 'audio/flac' : 'application/octet-stream'));
+  let xml = `  <D:response>\n`;
+  xml += `    <D:href>${href}</D:href>\n`;
+  xml += `    <D:propstat>\n`;
+  xml += `      <D:prop>\n`;
+  xml += `        <D:resourcetype/>\n`;
+  xml += `        <D:displayname>${escapeXml(fileName)}</D:displayname>\n`;
+  xml += `        <D:getcontentlength>${sizeBytes}</D:getcontentlength>\n`;
+  xml += `        <D:getcontenttype>${mimeType}</D:getcontenttype>\n`;
+  xml += `        <D:getetag>&quot;${track.id}-${sizeBytes}&quot;</D:getetag>\n`;
+  xml += `        <D:getlastmodified>Sat, 26 Sep 2026 00:00:00 GMT</D:getlastmodified>\n`;
+  xml += `      </D:prop>\n`;
+  xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+  xml += `    </D:propstat>\n`;
+  xml += `  </D:response>\n`;
+  return xml;
+}
+
+function getWebDavArtistMap() {
+  const map = new Map();
+  for (const track of trackIndex) {
+    const artistName = sanitizeWebDavName(track.artist || 'Unknown Artist');
+    if (!map.has(artistName)) {
+      map.set(artistName, []);
+    }
+    map.get(artistName).push(track);
+  }
+  return map;
+}
+
+app.all(['/dav', '/dav/*'], async (req, res) => {
+  const method = req.method.toUpperCase();
+  const basePrefix = req.secretPrefix ? `/${req.secretPrefix}` : '';
+
+  if (method === 'OPTIONS') {
+    res.setHeader('DAV', '1, 2');
+    res.setHeader('MS-Author-Via', 'DAV');
+    res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+    return res.status(200).end();
+  }
+
+  // Extract relative sub-path after /dav or /dav/
+  let subPath = req.path.replace(/^\/dav\/?/, '');
+  try {
+    subPath = decodeURIComponent(subPath);
+  } catch (_) {}
+  // Clean leading/trailing slashes
+  subPath = subPath.replace(/^\/+/, '').replace(/\/+$/, '');
+
+  const segments = subPath ? subPath.split('/') : [];
+  const firstSeg = segments[0] || '';
+
+  if (method === 'PROPFIND') {
+    res.setHeader('DAV', '1, 2');
+    const depth = req.headers.depth || '1';
+
+    // Root collection request: /dav or /dav/
+    if (!subPath) {
+      let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+      xml += `  <D:response>\n`;
+      xml += `    <D:href>${basePrefix}/dav/</D:href>\n`;
+      xml += `    <D:propstat>\n`;
+      xml += `      <D:prop>\n`;
+      xml += `        <D:resourcetype><D:collection/></D:resourcetype>\n`;
+      xml += `        <D:displayname>TeleMusic Library</D:displayname>\n`;
+      xml += `        <D:getlastmodified>${new Date().toUTCString()}</D:getlastmodified>\n`;
+      xml += `      </D:prop>\n`;
+      xml += `      <D:status>HTTP/1.1 200 OK</D:status>\n`;
+      xml += `    </D:propstat>\n`;
+      xml += `  </D:response>\n`;
+
+      if (depth !== '0') {
+        for (const track of trackIndex) {
+          const fileName = getTrackWebDavFileName(track);
+          const album = getTrackWebDavAlbum(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(album)}/${encodeURIComponent(fileName)}`;
+          xml += buildWebDavFileXml(itemHref, fileName, track);
+        }
+      }
+
+      xml += `</D:multistatus>`;
+      return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+    }
+
+    // Check if subPath is an album collection (e.g. /dav/House%20Of%20Balloons or /dav/House%20Of%20Balloons/)
+    const matchingTracks = trackIndex.filter(t => getTrackWebDavAlbum(t).toLowerCase() === subPath.toLowerCase());
+    if (matchingTracks.length > 0) {
+      const albumName = getTrackWebDavAlbum(matchingTracks[0]);
+      let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+      xml += buildWebDavCollectionXml(`${basePrefix}/dav/${encodeURIComponent(albumName)}/`, albumName);
+      if (depth !== '0') {
+        for (const track of matchingTracks) {
+          const fileName = getTrackWebDavFileName(track);
+          const itemHref = `${basePrefix}/dav/${encodeURIComponent(albumName)}/${encodeURIComponent(fileName)}`;
+          xml += buildWebDavFileXml(itemHref, fileName, track);
+        }
+      }
+      xml += `</D:multistatus>`;
+      return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+    }
+
+    // Specific file PROPFIND: /dav/Album/Artist - Title.flac or /dav/Artist - Title.flac
+    const targetFile = segments.length > 0 ? segments[segments.length - 1] : subPath;
+    const trackId = getTrackIdFromWebDavPath(subPath) || getTrackIdFromWebDavPath(targetFile);
+    const track = trackId ? findTrack(trackId) : null;
+    if (!track) {
+      return res.status(404).send('Not found');
+    }
+
+    if (!tagSliceCache.has(String(track.id)) && !fastStartCache.has(String(track.id))) {
+      prewarmTrackPreamble(String(track.id), null, track.title).catch(() => {});
+    }
+
+    const fileName = getTrackWebDavFileName(track);
+    const album = getTrackWebDavAlbum(track);
+    const itemHref = `${basePrefix}/dav/${encodeURIComponent(album)}/${encodeURIComponent(fileName)}`;
+    let xml = `<?xml version="1.0" encoding="utf-8" ?>\n<D:multistatus xmlns:D="DAV:">\n`;
+    xml += buildWebDavFileXml(itemHref, fileName, track);
+    xml += `</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset="utf-8"').send(xml);
+  }
+
+  if (method === 'GET' || method === 'HEAD') {
+    if (!subPath) {
+      if (method === 'HEAD') return res.status(200).end();
+      return res.send(`TeleMusic WebDAV Server is active. ${trackIndex.length} tracks available.`);
+    }
+
+    const targetFile = segments.length > 0 ? segments[segments.length - 1] : subPath;
+    const trackId = getTrackIdFromWebDavPath(subPath) || getTrackIdFromWebDavPath(targetFile);
+    if (!trackId) {
+      return res.status(404).send('File not found in library');
+    }
+
+    const track = findTrack(trackId);
+    if (track && !tagSliceCache.has(String(trackId)) && !fastStartCache.has(String(trackId))) {
+      prewarmTrackPreamble(String(trackId), null, track.title).catch(() => {});
+    }
+
+    return streamAudioTrack(trackId, req, res);
+  }
+
+  res.setHeader('Allow', 'OPTIONS, GET, HEAD, PROPFIND');
+  return res.status(405).send('Method Not Allowed');
 });
 
 // Manual refresh endpoint
@@ -2205,8 +2949,11 @@ app.get('/debug/faststart/clear', (req, res) => {
 
 // Status / Health endpoint
 app.get('/', (req, res) => {
+  if (!isTelegramReady && !setupApi.isConfigured()) {
+    return res.redirect('/setup');
+  }
   res.json({
-    status: 'online',
+    status: isTelegramReady ? 'online' : 'setup_mode',
     version: pkg.version,
     app: 'BitChord Telegram Music Addon',
     tracksCount: trackIndex.length,
@@ -2218,33 +2965,52 @@ app.get('/', (req, res) => {
 
 async function resolveChannel(channelInput = CHANNEL) {
   if (!channelInput) return null;
-  console.log(`Resolving channel "${channelInput}"...`);
-  // Calling getDialogs populates Telegram entity cache with access hashes for private channels
-  const dialogs = await client.getDialogs({ limit: 100 });
   const cleanInput = String(channelInput).trim();
-  const stripped = cleanInput.replace(/^-100/, '').replace(/^@/, '').toLowerCase();
+  let target = cleanInput;
+  const tmeMatch = cleanInput.match(/t\.me\/(?:c\/)?([a-zA-Z0-9_+-]+)/i);
+  if (tmeMatch) {
+    target = tmeMatch[1];
+  }
+  const stripped = target.replace(/^-100/, '').replace(/^@/, '').toLowerCase();
 
-  for (const d of dialogs) {
-    const entity = d.entity;
-    if (!entity) continue;
-    const entityId = entity.id ? entity.id.toString() : '';
-    const username = (entity.username || '').toLowerCase();
-    const title = (entity.title || '').toLowerCase();
+  try {
+    // Automatically iterate through user dialogs until the target channel is matched
+    for await (const d of client.iterDialogs({ limit: 1000 })) {
+      const entity = d.entity;
+      if (!entity) continue;
+      const entityId = entity.id ? entity.id.toString() : '';
+      const username = (entity.username || '').toLowerCase();
+      const title = (entity.title || '').toLowerCase();
 
-    if (
-      entityId === cleanInput ||
-      `-100${entityId}` === cleanInput ||
-      entityId === stripped ||
-      (username && username === stripped) ||
-      title === cleanInput.toLowerCase()
-    ) {
-      console.log(`Successfully matched channel dialog: "${entity.title || entity.username}" (ID: ${entityId})`);
-      return entity;
+      if (
+        entityId === cleanInput ||
+        `-100${entityId}` === cleanInput ||
+        entityId === target ||
+        entityId === stripped ||
+        `-100${entityId}` === target ||
+        (username && (username === stripped || username === target.toLowerCase())) ||
+        title === cleanInput.toLowerCase() ||
+        title === target.toLowerCase()
+      ) {
+        return entity;
+      }
+    }
+  } catch (_) {}
+
+  // Fallback to direct resolution for public @usernames (do not query numeric IDs to avoid MTProto RPC errors)
+  const isNumeric = /^-?\d+$/.test(target) || /^-?100\d+$/.test(target);
+  if (!isNumeric) {
+    try {
+      return await client.getEntity(cleanInput);
+    } catch (_) {
+      if (cleanInput.startsWith('@')) {
+        try {
+          return await client.getEntity(cleanInput.slice(1));
+        } catch (_) {}
+      }
     }
   }
-
-  // Fallback to direct resolution
-  return await client.getEntity(cleanInput);
+  return null;
 }
 
 const SYSTEM_PREFIXES = ['Searching for', '🎧', '🔍', '⏳', '🚀', '✅', '❌', 'ℹ️', '🧹', '⚠️', 'Duplicate detected', '**Duplicate detected', '<b>Duplicate detected'];
@@ -2252,21 +3018,25 @@ const SYSTEM_PREFIXES = ['Searching for', '🎧', '🔍', '⏳', '🚀', '✅', 
 async function cleanupOrphanedDuplicateNotices() {
   if (!channelEntity) return;
   try {
-    const recent = await client.getMessages(channelEntity, { limit: 50 });
-    const toDelete = [];
-    const now = Math.floor(Date.now() / 1000);
+    const recent = await client.getMessages(channelEntity, { limit: 100 });
+    const toDelete = new Set();
     for (const msg of recent) {
       const text = msg.message || msg.text || '';
-      if (text.includes('Duplicate detected:') && (text.includes('Deleting in') || text.includes('Send /keep to save'))) {
-        const msgAgeSec = now - (msg.date || 0);
-        if (msgAgeSec > Math.round(DUPLICATE_GRACE_PERIOD_MS / 1000) + 5) {
-          toDelete.push(msg.id);
+      if (text.includes('Duplicate detected:') || (text.includes('Deleting in') && text.includes('Send /keep to save'))) {
+        toDelete.add(msg.id);
+        const repliedMsgId = msg.replyTo?.replyToMsgId || msg.replyToMsgId;
+        if (repliedMsgId) {
+          toDelete.add(repliedMsgId);
         }
       }
     }
-    if (toDelete.length > 0) {
-      console.log(`[Cleanup] Found ${toDelete.length} orphaned duplicate warning notice(s). Deleting...`);
-      await deleteTelegramMessages(toDelete);
+    if (toDelete.size > 0) {
+      const deleteIds = Array.from(toDelete);
+      logCli('CLEANUP', `Processing ${BOLD}${deleteIds.length}${RESET} duplicate notice/file(s) on server restart`);
+      for (const id of deleteIds) {
+        deleteMessageViaBot(id).catch(() => {});
+      }
+      await deleteTelegramMessages(deleteIds);
     }
   } catch (err) {
     console.warn('[Cleanup Error]:', err.message);
@@ -2296,55 +3066,44 @@ async function isFromBot(msg) {
   return false;
 }
 
-async function startBotCallbackPoller(botToken) {
-  let offset = 0;
-  console.log('[Bot Poller] Active for real inline buttons.');
-  while (true) {
-    try {
-      const res = await fetch(`https://api.telegram.org/bot${botToken}/getUpdates?offset=${offset}&timeout=25&allowed_updates=["callback_query"]`);
-      const data = await res.json();
-      if (data.ok && data.result) {
-        for (const update of data.result) {
-          offset = update.update_id + 1;
-          const cq = update.callback_query;
-          if (!cq || !cq.data) continue;
-
-          fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callback_query_id: cq.id })
-          }).catch(() => {});
-
-          if (cq.data === 'cancel') {
-            await cancelPicker(client, channelEntity);
-          } else if (cq.data === 'bot_next') {
-            await navigateBotPicker(client, channelEntity, '➡️');
-          } else if (cq.data === 'bot_prev') {
-            await navigateBotPicker(client, channelEntity, '⬅️');
-          } else {
-            const opt = parseInt(cq.data, 10);
-            if (!isNaN(opt)) {
-              await handlePickerChoice(client, channelEntity, opt, onTrackForwarded);
-            }
-          }
-        }
-      }
-    } catch (_) {
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-  }
-}
-
-(async () => {
+async function startTelegramService() {
+  if (isTelegramReady) return;
   try {
     loadCache();
     loadNotificationState();
-    console.log('Connecting to Telegram MTProto...');
-    await client.connect();
-    console.log('Connected to Telegram!');
 
-    channelEntity = await resolveChannel(CHANNEL);
-    console.log(`Using Telegram channel: ${channelEntity.title || channelEntity.username || CHANNEL}`);
+    const env = setupApi.readEnvMap();
+    const apiId = API_ID || parseInt(env.TELEGRAM_API_ID, 10);
+    const apiHash = API_HASH || env.TELEGRAM_API_HASH;
+    const sessionString = SESSION_STRING || env.TELEGRAM_SESSION_STRING;
+
+    if (!client && apiId && apiHash) {
+      client = new TelegramClient(new StringSession(sessionString || ''), apiId, apiHash, {
+        connectionRetries: 10,
+        autoReconnect: true,
+        useWSS: process.env.USE_WSS !== 'false',
+        baseLogger: new Logger('none'),
+      });
+      client.setLogLevel('none');
+    }
+
+    if (!client) {
+      console.warn('[Telegram Service] Cannot start: missing API ID or Hash.');
+      return;
+    }
+
+    await client.connect();
+    logCli('TELEGRAM', `Connected to MTProto session`);
+
+    const currentChannel = CHANNEL || cleanEnv(process.env.TELEGRAM_CHANNEL) || env.TELEGRAM_CHANNEL;
+    channelEntity = await resolveChannel(currentChannel);
+    if (!channelEntity) {
+      logCli('CHANNEL', `Could not access or find channel: ${BOLD}"${currentChannel}"${RESET}. Check permissions or channel ID.`);
+      return;
+    }
+    const chanTitle = channelEntity.title || channelEntity.username || currentChannel;
+    const chanId = channelEntity.id ? ` ${DIM}(ID: ${channelEntity.id})${RESET}` : '';
+    logCli('CHANNEL', `Connected to ${BOLD}${chanTitle}${RESET}${chanId}`);
 
     if (teledrive) {
       await teledrive.initTeleDrive(client, channelEntity, resolveChannel);
@@ -2352,70 +3111,14 @@ async function startBotCallbackPoller(botToken) {
 
     await cleanupOrphanedDuplicateNotices();
 
-    const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-    if (BOT_TOKEN) {
-      startBotCallbackPoller(BOT_TOKEN);
-    }
-
-    // Set up real-time listener for /s commands, picker choices, audio uploads, and auto-purge cleaner
+    // Set up real-time listener for audio uploads, /keep flag, and auto-purge cleaner
     client.addEventHandler(async (event) => {
       try {
         const message = event.message;
         if (!message) return;
 
         const isMusicChannel = channelEntity && message.peerId && (utils.getPeerId(message.peerId).toString() === utils.getPeerId(channelEntity).toString());
-        const isSelfChat = message.isPrivate; // e.g. Saved Messages
         const trimmedText = (message.text || message.message || '').trim();
-
-        // Handle /s and /song search commands
-        if (/^[#/](?:song|s)(?:\s+.*)?$/i.test(trimmedText)) {
-          if (isMusicChannel || isSelfChat) {
-            console.log(`[Song Command] Detected: "${trimmedText}" (msg ID: ${message.id})`);
-            handleSongCommand(client, channelEntity, trimmedText, message.id, onTrackForwarded).catch((err) => {
-              console.error('[Song Command Error]:', err.message);
-            });
-            return;
-          }
-        }
-
-        // Handle picker selection
-        const pickerMatch = trimmedText.match(/^\/(\d+)$/);
-        if (pickerMatch && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            const choice = parseInt(pickerMatch[1], 10);
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            handlePickerChoice(client, channelEntity, choice, onTrackForwarded).catch((err) => {
-              console.error('[Picker Choice Error]:', err.message);
-            });
-            return;
-          }
-        }
-
-        // Handle picker pagination
-        if ((trimmedText === '/next' || trimmedText === '/more' || trimmedText === '➡️') && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            navigateBotPicker(client, channelEntity, '➡️').catch(() => {});
-            return;
-          }
-        }
-
-        if ((trimmedText === '/prev' || trimmedText === '⬅️') && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            navigateBotPicker(client, channelEntity, '⬅️').catch(() => {});
-            return;
-          }
-        }
-
-        // Handle picker cancellation
-        if (trimmedText === '/cancel' && hasActivePicker(channelEntity)) {
-          if (isMusicChannel || isSelfChat) {
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
-            cancelPicker(client, channelEntity).catch(() => {});
-            return;
-          }
-        }
 
         // Handle /keep command
         if (/^[#/](?:keep|ig)(?:\s+.*)?$/i.test(trimmedText)) {
@@ -2455,13 +3158,17 @@ async function startBotCallbackPoller(botToken) {
                 if (confirmMsg) {
                   setTimeout(() => {
                     deleteMessageViaBot(confirmMsg.id).catch(() => {});
-                    client.deleteMessages(channelEntity, [confirmMsg.id, message.id], { revoke: true }).catch(() => {});
+                    client.deleteMessages(channelEntity, [confirmMsg.id, message.id], { revoke: true }).catch(() => {
+                      deleteMessageViaBot(message.id).catch(() => {});
+                    });
                   }, 12000);
                 }
               }
             } else {
               setTimeout(() => {
-                client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
+                client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {
+                  deleteMessageViaBot(message.id).catch(() => {});
+                });
               }, 4000);
             }
             return;
@@ -2495,11 +3202,12 @@ async function startBotCallbackPoller(botToken) {
           const hasButtons = Boolean(message.replyMarkup);
           const isBotSender = await isFromBot(message);
           const isSystemText = SYSTEM_PREFIXES.some(p => trimmedText.startsWith(p));
-          const isPicker = isPickerMenu(channelEntity, message.id);
 
-          if (!isCommand && !hasButtons && !isBotSender && !isSystemText && !isPicker) {
+          if (!isCommand && !hasButtons && !isBotSender && !isSystemText) {
             console.log(`[Channel Cleaner] Auto-purging user non-music message (msg ID: ${message.id}): "${trimmedText.slice(0, 30)}"`);
-            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {});
+            client.deleteMessages(channelEntity, [message.id], { revoke: true }).catch(() => {
+              deleteMessageViaBot(message.id).catch(() => {});
+            });
           }
         }
       } catch (err) {
@@ -2510,42 +3218,168 @@ async function startBotCallbackPoller(botToken) {
     // Start 30-minute digest and 12-hour auto-deletion interval checker (checks every 5 minutes)
     setInterval(checkDigestSchedule, 5 * 60 * 1000);
 
-    // Telegram connection watchdog: keeps client alive and restarts if disconnected
+    // Periodic TeleDrive catch-up scan of last 100 messages (every 10 minutes)
     setInterval(async () => {
-      try {
-        if (!client.connected) {
-          console.warn('[Watchdog] MTProto disconnected. Reconnecting...');
-          await client.connect();
-          console.log('[Watchdog] MTProto reconnected successfully.');
-        }
-      } catch (err) {
-        console.warn('[Watchdog] Reconnect failed:', err.message);
+      if (teledrive && isTelegramReady && client && channelEntity) {
+        await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
+          isAudioDocument,
+          parseTrackMessage,
+          isDuplicate,
+          trackIndex,
+          processTrackUpload,
+        }).catch(() => {});
       }
-    }, 15000);
+    }, 10 * 60 * 1000);
 
-    app.listen(PORT, '0.0.0.0', async () => {
-      console.log(`BitChord Addon server running on http://0.0.0.0:${PORT}`);
-      if (URL_SECRET) {
-        console.log(`Manifest URL (Secret Protected): http://localhost:${PORT}/${URL_SECRET}/manifest.json`);
-        console.log(`[Security] URL_SECRET protection active — unauthorized public requests will be blocked.`);
-      } else {
-        console.log(`Manifest URL: http://localhost:${PORT}/manifest.json`);
+
+
+    isTelegramReady = true;
+
+    try {
+      await buildTrackIndex();
+      if (teledrive) {
+        await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
+          isAudioDocument,
+          parseTrackMessage,
+          isDuplicate,
+          trackIndex,
+          processTrackUpload,
+        });
       }
-      try {
-        await buildTrackIndex();
-        if (teledrive) {
-          await teledrive.syncTeleDriveExistingTracks(client, channelEntity, {
-            isAudioDocument,
-            parseTrackMessage,
-            isDuplicate,
-            trackIndex,
-            processTrackUpload,
+      checkDigestSchedule();
+      isStartupComplete = true;
+      console.log('');
+      hasInsertedStartupGap = true;
+    } catch (err) {
+      console.error('Initial indexing error:', err.message);
+    }
+  } catch (err) {
+    console.error('[Telegram Init Error]:', err.message);
+  }
+}
+
+function tryOpenBrowser(url) {
+  try {
+    const { exec } = require('child_process');
+    const cmd =
+      process.platform === 'win32'
+        ? `start "" "${url}"`
+        : process.platform === 'darwin'
+        ? `open "${url}"`
+        : `xdg-open "${url}"`;
+    const child = exec(cmd, () => {});
+    if (child && typeof child.unref === 'function') {
+      child.unref();
+    }
+  } catch (_) {}
+}
+
+function printUrlBanner(label, urlStr) {
+  console.log('');
+  console.log(`  ${label}:`);
+  console.log(`  ${urlStr}`);
+}
+
+(async () => {
+  try {
+    app.listen(PORT, '0.0.0.0', async () => {
+      const secretAtStart = getUrlSecret();
+      const secretPath = secretAtStart ? `/${secretAtStart}` : '';
+      const localManifest = `http://localhost:${PORT}${secretPath}/manifest.json`;
+
+      console.log('');
+      console.log(`  Telegram Music Addon server running on: http://0.0.0.0:${PORT}`);
+      console.log(`  Setup Wizard: http://localhost:${PORT}/setup`);
+      console.log(`  Local Manifest URL: ${localManifest}`);
+      if (secretAtStart) {
+        console.log(`  [Security] URL_SECRET protection active: unauthorized public requests will be blocked.`);
+      }
+      console.log('');
+
+      const enableTunnel = process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false';
+      if (enableTunnel) {
+        tunnel.startTunnel(PORT).then(url => {
+          const secret = getUrlSecret();
+          const sPath = secret ? `/${secret}` : '';
+          console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+          printUrlBanner('BitChord Addon URL (HTTPS for phone)', `${url}${sPath}/manifest.json`);
+        }).catch(err => {
+          console.warn('[Cloudflare Tunnel Warning]:', err.message);
+        });
+      }
+
+      const configured = setupApi.isConfigured();
+      const shouldOpenBrowser = !configured || process.env.OPEN_BROWSER === 'true' || process.argv.includes('--open');
+      if (shouldOpenBrowser) {
+        setTimeout(() => {
+          tryOpenBrowser(`http://localhost:${PORT}/setup`);
+        }, 1000);
+      }
+
+      if (configured) {
+        await startTelegramService();
+      } else {
+        console.log('=================================================================');
+        console.log('         Telegram Music Setup Required                           ');
+        console.log('=================================================================');
+        console.log(`\nOpening http://localhost:${PORT}/setup in your browser to complete onboarding.\n`);
+      }
+
+      setupApi.setOnConfigSaved(async (updates) => {
+        console.log('[Setup] New configuration received. Initializing Telegram service...');
+        if (updates.URL_SECRET !== undefined) {
+          process.env.URL_SECRET = updates.URL_SECRET;
+        }
+        if (!client || !client.connected) {
+          const parsedApiId = parseInt(updates.TELEGRAM_API_ID, 10);
+          client = new TelegramClient(new StringSession(updates.TELEGRAM_SESSION_STRING), parsedApiId, updates.TELEGRAM_API_HASH, {
+            connectionRetries: 10,
+            autoReconnect: true,
+            useWSS: process.env.USE_WSS !== 'false',
+            baseLogger: new Logger('none'),
+          });
+          client.setLogLevel('none');
+        }
+        if (updates.ENABLE_CLOUDFLARE_TUNNEL !== 'false') {
+          tunnel.startTunnel(parseInt(updates.PORT || PORT, 10)).then(url => {
+            const secret = getUrlSecret();
+            const secretPath = secret ? `/${secret}` : '';
+            console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+            printUrlBanner('BitChord Addon URL (HTTPS for phone)', `${url}${secretPath}/manifest.json`);
+          }).catch(err => {
+            console.warn('[Cloudflare Tunnel Warning]:', err.message);
           });
         }
-        checkDigestSchedule();
-      } catch (err) {
-        console.error('Initial indexing error:', err.message);
-      }
+        await startTelegramService();
+      });
+
+      setupApi.setOnRestart(async () => {
+        console.log('\n[Restart] Refreshing Telegram Music Addon services and cache...');
+        require('dotenv').config({ override: true });
+        mediaCache.clear();
+        fastStartCache.clear();
+        isTelegramReady = false;
+        isStartupComplete = false;
+        hasInsertedStartupGap = false;
+
+        if (process.env.ENABLE_CLOUDFLARE_TUNNEL !== 'false') {
+          console.log('[Restart] Refreshing Cloudflare HTTPS tunnel...');
+          tunnel.stopTunnel();
+          try {
+            const url = await tunnel.startTunnel(parseInt(process.env.PORT || PORT, 10));
+            const secret = getUrlSecret();
+            const secretPath = secret ? `/${secret}` : '';
+            console.log(`[Cloudflare HTTPS Tunnel]: ${url}`);
+            printUrlBanner('BitChord Addon URL (HTTPS for phone)', `${url}${secretPath}/manifest.json`);
+          } catch (tErr) {
+            console.warn('[Cloudflare Tunnel Warning]:', tErr.message);
+          }
+        }
+
+        await startTelegramService();
+        console.log(`[Restart] Service restart complete. ${trackIndex.length} track(s) ready.\n`);
+        return { tracksCount: trackIndex.length, tunnelUrl: tunnel.getTunnelUrl() };
+      });
     });
   } catch (err) {
     console.error('Fatal startup error:', err);

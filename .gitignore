@@ -15,6 +15,10 @@ Thumbs.db
 tasks/
 scratch/
 notification_state.json
-tracks_cache.json
+tracks_cache.json*
 *.bak
+teledrive_state.json
 teledrive.js
+CHANGES.md
+*.zip
+

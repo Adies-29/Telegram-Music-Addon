@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telegram Music Addon Setup</title>
+  <link rel="icon" type="image/png" href="/icon.png?v=2">
+  <link rel="stylesheet" href="/public/setup.css?v=30">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icon.png?v=2" alt="Telegram Music Logo" class="brand-icon" onerror="this.style.display='none'">
+        <div>
+          <h1 class="brand-title">Telegram Music Addon</h1>
+          <p class="brand-subtitle">Personal Audio Vault Setup</p>
+        </div>
+      </div>
+      <a href="https://github.com/Imnotshashwat/Telegram-Music-Addon" target="_blank" rel="noopener noreferrer" class="github-link" title="Open GitHub Repository" aria-label="GitHub Repository">
+        <svg class="github-icon" viewBox="0 0 24 24" width="22" height="22" fill="currentColor">
+          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/>
+        </svg>
+      </a>
+    </header>
+
+    <main class="wizard-card">
+      <nav class="steps-progress" aria-label="Setup steps">
+        <div class="step-indicator active" id="stepIndicator1" data-step="1" title="Step 1: Telegram">
+          <span class="step-num">1</span>
+          <span class="step-text">Telegram</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator2" data-step="2" title="Step 2: Verification">
+          <span class="step-num">2</span>
+          <span class="step-text">Verification</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator3" data-step="3" title="Step 3: Storage & Network">
+          <span class="step-num">3</span>
+          <span class="step-text">Storage & Network</span>
+        </div>
+        <div class="step-divider"></div>
+        <div class="step-indicator" id="stepIndicator4" data-step="4" title="Step 4: Connect">
+          <span class="step-num">4</span>
+          <span class="step-text">Connect</span>
+        </div>
+      </nav>
+
+      <div class="alert-box error hidden" id="globalError" role="alert"></div>
+
+      <!-- Step 1: Telegram Credentials -->
+      <section class="step-panel" id="panelStep1">
+        <div class="panel-header center">
+          <span class="step-badge">Step 1 of 4</span>
+          <h2>Connect Telegram</h2>
+          <p>Authenticate via MTProto to enable direct high-speed streaming from your audio vault.</p>
+        </div>
+
+        <form id="formCredentials" class="setup-form">
+          <div class="form-group">
+            <label for="apiId">API ID</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="apiId" name="apiId" class="masked-credential" required autocomplete="off">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="apiHash">API Hash</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="apiHash" name="apiHash" class="masked-credential" required autocomplete="off">
+            </div>
+          </div>
+
+          <div class="helper-callout">
+            <p>Need your API credentials? Open <a href="https://my.telegram.org" target="_blank" rel="noopener">my.telegram.org</a> &rarr; <strong>API development tools</strong> to create an app (takes 1 minute).</p>
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn primary" id="btnStep1Next">Next</button>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 2: Verification Code & 2FA -->
+      <section class="step-panel hidden" id="panelStep2">
+        <div class="panel-header center">
+          <span class="step-badge">Step 2 of 4</span>
+          <h2>Verify Telegram Account</h2>
+          <p id="codeNotice">Enter your phone number to receive a verification code in your official Telegram app.</p>
+        </div>
+
+        <form id="formVerifyCode" class="setup-form">
+          <!-- Stage 1: Phone Number -->
+          <div class="form-group" id="phoneGroup">
+            <label for="phoneNumber">Phone number</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="phoneNumber" name="phoneNumber" class="masked-credential" required autocomplete="off">
+            </div>
+            <span class="field-hint">Include your country calling code (e.g. +1 for US, +91 for India).</span>
+            <button type="button" class="btn primary btn-send-full" id="btnSendCode">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 6px;">
+                <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+              </svg>
+              <span>Send Code</span>
+            </button>
+          </div>
+
+          <!-- Stage 2: OTP Slots (Revealed after code request) -->
+          <div class="otp-section hidden" id="otpSection">
+            <div class="otp-divider-label">
+              <span>Code</span>
+            </div>
+            <div class="otp-slots-wrap" id="otpSlotsWrap">
+              <input type="text" class="otp-slot" maxlength="1" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-index="0" aria-label="Digit 1">
+              <input type="text" class="otp-slot" maxlength="1" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-index="1" aria-label="Digit 2">
+              <input type="text" class="otp-slot" maxlength="1" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-index="2" aria-label="Digit 3">
+              <input type="text" class="otp-slot" maxlength="1" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-index="3" aria-label="Digit 4">
+              <input type="text" class="otp-slot" maxlength="1" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-index="4" aria-label="Digit 5">
+            </div>
+            <input type="hidden" id="phoneCode" name="phoneCode">
+            <p class="field-hint center-hint" id="otpHint">Check your Telegram app for the verification code.</p>
+            <div class="resend-countdown-wrap">
+              <span class="resend-notice-text" id="resendNoticeText">Didn't get the code?</span>
+              <button type="button" class="btn-resend-link" id="btnResendCode" disabled>Resend in <span id="resendTimer">60</span>s</button>
+            </div>
+          </div>
+
+          <!-- 2FA Cloud Password (Revealed if 2FA enabled) -->
+          <div class="form-group hidden" id="twoFaContainer">
+            <label for="twoFaPassword">Two-Step Verification Password</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="twoFaPassword" name="twoFaPassword" class="masked-credential" placeholder="Enter your 2FA password" autocomplete="current-password">
+            </div>
+            <span class="field-hint">Your account is protected by Telegram Cloud Password (2FA).</span>
+          </div>
+
+          <div class="form-actions split">
+            <button type="button" class="btn secondary" id="btnStep2Back">Back</button>
+            <div class="action-group-right">
+              <button type="button" class="btn primary" id="btnStep2Next">Next</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 3: Source & Network Setup -->
+      <section class="step-panel hidden" id="panelStep3">
+        <div class="panel-header center">
+          <span class="step-badge">Step 3 of 4</span>
+          <h2>Source & Network Setup</h2>
+          <p>Connect your library storage, automation bot, and streaming tunnel.</p>
+        </div>
+
+        <form id="formLibrary" class="setup-form">
+          <div class="form-group">
+            <label for="channelInput">Telegram Channel (ID, URL, or @username)</label>
+            <div class="password-input-wrapper">
+              <input type="password" id="channelInput" name="channel" class="masked-credential" required autocomplete="off">
+            </div>
+            <span class="field-hint" id="channelHint">Enter your channel ID (e.g. <code>-1001234567890</code>), public <code>@username</code>, or Telegram link.</span>
+          </div>
+
+          <div class="option-card">
+            <label class="toggle-control">
+              <input type="checkbox" id="enableBotSync" name="enableBotSync">
+              <span class="toggle-track"></span>
+              <span class="toggle-label">
+                <span class="toggle-title">Telegram Bot Automation (Optional)</span>
+                <span class="subtext">Auto-search, duplicate alerts, and audio forwarding via a dedicated Telegram bot.</span>
+              </span>
+            </label>
+            <div class="form-group bot-token-container hidden" id="botTokenContainer">
+              <label for="botToken">Bot Token</label>
+              <div class="password-input-wrapper">
+                <input type="password" id="botToken" name="botToken" class="masked-credential" autocomplete="off">
+              </div>
+              <span class="field-hint">Don't have a bot token? Get it from <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>.</span>
+            </div>
+          </div>
+
+          <div class="option-card">
+            <label class="toggle-control">
+              <input type="checkbox" id="enableTunnel" name="enableTunnel" checked>
+              <span class="toggle-track"></span>
+              <span class="toggle-label">
+                <span class="toggle-title">Enable Cloudflare Quick Tunnel</span>
+                <span class="subtext">Creates an encrypted public HTTPS endpoint so BitChord and ExoPlayer stream on mobile without mixed-content blocks.</span>
+              </span>
+            </label>
+          </div>
+
+          <div class="collapsible-section" id="advancedSection">
+            <button type="button" class="collapsible-toggle" id="toggleAdvanced">
+              <span>Advanced Routing</span>
+              <span class="toggle-arrow">▼</span>
+            </button>
+            <div class="collapsible-content hidden" id="advancedContent">
+              <div class="form-group">
+                <label for="urlSecret">URL Secret</label>
+                <div class="password-input-wrapper">
+                  <input type="password" id="urlSecret" name="urlSecret" class="masked-credential" placeholder="Leave blank to auto-generate secret" autocomplete="off">
+                </div>
+                <span class="field-hint">Secures your manifest and audio endpoints with a secret URL path. Auto-generated if left empty.</span>
+              </div>
+              <div class="form-group">
+                <label for="customPublicUrl">Custom Reverse Proxy / FQDN (Optional)</label>
+                <input type="text" id="customPublicUrl" name="customPublicUrl" placeholder="https://music.example.com" autocomplete="off">
+                <span class="field-hint">Overrides the auto-generated address for Tailscale Funnel, Cloudflare Zero Trust, or custom Nginx setups.</span>
+              </div>
+              <div class="form-group">
+                <label for="serverPort">Local Listener Port</label>
+                <input type="number" id="serverPort" name="port" value="3000" min="1024" max="65535" placeholder="3000">
+                <span class="field-hint">Local port bound by the Node server.</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-actions split">
+            <button type="button" class="btn secondary" id="btnStep3Back">Back</button>
+            <div class="action-group-right">
+              <button type="button" class="btn primary" id="btnStep3Next">Next</button>
+            </div>
+          </div>
+        </form>
+      </section>
+
+      <!-- Step 4: Finished & BitChord Connect -->
+      <section class="step-panel hidden" id="panelStep4">
+        <div class="panel-header center">
+          <span class="step-badge">Step 4 of 4</span>
+          <div class="success-badge">✓</div>
+          <h2>Ready to Stream!</h2>
+          <p>Telegram Music is configured and connected to your Telegram channel.</p>
+          <div class="status-pill-wrap">
+            <span class="status-pill">
+              <span class="pulse-dot"></span>
+              <span id="step4TrackStatus">Online &bull; Checking tracks...</span>
+            </span>
+          </div>
+        </div>
+
+        <div class="connection-box">
+          <div class="qr-wrapper">
+            <div id="qrCodeContainer" class="qr-canvas"></div>
+            <p class="qr-caption">Scan with your phone</p>
+          </div>
+
+          <div class="details-wrapper">
+            <div class="url-card">
+              <label for="manifestUrl">BitChord Addon URL</label>
+              <div class="url-input-group">
+                <input type="text" id="manifestUrl" readonly class="url-readonly-input">
+                <button type="button" class="btn copy btn-copy-inline" id="btnCopyManifest">
+                  <span>Copy</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="url-card">
+              <label for="webdavUrl">WebDAV URL</label>
+              <div class="url-input-group">
+                <input type="text" id="webdavUrl" readonly class="url-readonly-input">
+                <button type="button" class="btn copy btn-copy-inline" id="btnCopyWebdav">
+                  <span>Copy</span>
+                </button>
+              </div>
+            </div>
+
+            <div class="instructions-card">
+              <h3>How to Add to BitChord</h3>
+              <ol>
+                <li>Open <strong>BitChord</strong> on your device.</li>
+                <li>Go to <strong>Settings</strong> &gt; <strong>Sources</strong> &gt; <strong>Add an addon (or WebDAV)</strong>.</li>
+              </ol>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-actions split">
+          <button type="button" class="btn secondary" id="btnRestartServer" title="Restart the backend Node.js server process">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px;">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+            <span>Restart Server</span>
+          </button>
+          <div class="action-group-right">
+            <button type="button" class="btn secondary" id="btnReconfigure">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 6px;">
+                <circle cx="12" cy="12" r="3"></circle>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+              </svg>
+              <span>Reconfigure</span>
+            </button>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/public/setup.js?v=30"></script>
+</body>
+</html>
